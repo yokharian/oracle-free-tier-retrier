@@ -634,12 +634,20 @@ prompt_shape_config() {
 }
 
 prompt_ssh_key() {
-    read -p "SSH public key file path (leave empty to skip): " ssh_key_path
+    SSH_PUBLIC_KEY=$(parse_tfvar "ssh_public_key")
 
-    SSH_PUBLIC_KEY=""
+    if [[ -n "$SSH_PUBLIC_KEY" ]]; then
+        log_info "SSH key loaded from terraform.tfvars"
+        echo ""
+        return
+    fi
+
+    log_warn "No ssh_public_key in terraform.tfvars."
+    read -p "Enter SSH public key file path (leave empty to skip): " ssh_key_path
+
     if [ -n "$ssh_key_path" ] && [ -f "$ssh_key_path" ]; then
         SSH_PUBLIC_KEY=$(cat "$ssh_key_path")
-        log_info "SSH key loaded"
+        log_info "SSH key loaded from file"
     elif [ -n "$ssh_key_path" ]; then
         log_warn "File not found, skipping SSH key"
     fi
@@ -693,12 +701,27 @@ deploy_cli() {
     declare -a CREATED_ADS=()
     declare -a CREATED_IDS=()
     declare -a FAILED_ADS=()
+    declare -a FAILED_REASONS=()
+
+    parse_failure_reason() {
+        local output="$1"
+        if echo "$output" | grep -qi "out of.*capacity\|outhostcapacity\|limitexceeded"; then
+            echo "Out of capacity"
+        elif echo "$output" | grep -qi "not authorized\|notauthorized"; then
+            echo "Authorization failed"
+        elif echo "$output" | grep -qi "invalid\|bad request"; then
+            echo "Invalid configuration"
+        elif echo "$output" | grep -qi "serviceerror"; then
+            echo "$output" | grep -o '"message": "[^"]*"' | head -1 | sed 's/"message": "//;s/"//'
+        else
+            echo "Unknown error"
+        fi
+    }
 
     while [[ ${#CREATED_ADS[@]} -lt $ad_count ]]; do
         for i in $(seq 0 $((ad_count - 1))); do
             ad_name=$(echo "$ads" | jq -r ".data[$i].name")
 
-            # Skip already created
             already_created=false
             for created in "${CREATED_ADS[@]+"${CREATED_ADS[@]}"}"; do
                 if [[ "$created" == "$ad_name" ]]; then
@@ -733,40 +756,44 @@ deploy_cli() {
                 launch_cmd+=(--metadata "{\"ssh_authorized_keys\": \"$SSH_PUBLIC_KEY\"}")
             fi
 
-            set +e
-            output=$("${launch_cmd[@]}" 2>&1)
-            rc=$?
-            set -e
+            output=$("${launch_cmd[@]}" 2>&1) || true
 
-            if [[ $rc -eq 0 ]]; then
+            if echo "$output" | jq -e '.data.id' >/dev/null 2>&1; then
                 instance_ocid=$(echo "$output" | jq -r '.data.id')
                 CREATED_ADS+=("$ad_name")
                 CREATED_IDS+=("$instance_ocid")
                 log_info "  $instance_name created: $instance_ocid"
             else
+                reason=$(parse_failure_reason "$output")
                 FAILED_ADS+=("$ad_name")
-                log_error "  Failed to create $instance_name in $ad_name"
-                echo "$output" | tail -5
+                FAILED_REASONS+=("$reason")
+                log_error "  Failed: $instance_name in $ad_name"
+                log_error "  Reason: $reason"
             fi
             echo ""
         done
 
-        # Check if all succeeded
         if [[ ${#CREATED_ADS[@]} -lt $ad_count ]]; then
             log_warn "${#FAILED_ADS[@]} AD(s) failed. Retrying in ${SLEEP_SECONDS}s..."
-            log_warn "Failed ADs: ${FAILED_ADS[*]}"
+            for idx in "${!FAILED_ADS[@]}"; do
+                log_warn "  ${FAILED_ADS[$idx]}: ${FAILED_REASONS[$idx]}"
+            done
             FAILED_ADS=()
+            FAILED_REASONS=()
             sleep "$SLEEP_SECONDS"
         fi
     done
 
     log_info "=== Summary ==="
     printf "Successful: %d\n" "${#CREATED_ADS[@]}"
-    echo ""
-    printf "Instance Details:\n"
-    for idx in "${!CREATED_ADS[@]}"; do
-        printf "  %s: %s\n" "${CREATED_ADS[$idx]}" "${CREATED_IDS[$idx]}"
-    done
+
+    if [[ ${#CREATED_ADS[@]} -gt 0 ]]; then
+        echo ""
+        printf "Created Instances:\n"
+        for idx in "${!CREATED_ADS[@]}"; do
+            printf "  %s: %s\n" "${CREATED_ADS[$idx]}" "${CREATED_IDS[$idx]}"
+        done
+    fi
 }
 
 # ==========================================
