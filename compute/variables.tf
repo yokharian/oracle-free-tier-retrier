@@ -61,7 +61,7 @@ variable "assign_public_ip" {
   default     = true
 }
 
-variable "subnet_display_name" {
-  description = "Display name of the subnet to attach the instance to"
+variable "subnet_id" {
+  description = "OCID of the subnet to attach the instance to"
   type        = string
 }

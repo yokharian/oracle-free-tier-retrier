@@ -129,6 +129,7 @@ class TestApplyStack:
         result = main.apply_stack(mock_rm, "stack-id")
         assert result == "job-123"
         details = mock_rm.create_job.call_args[1]["create_job_details"]
+        assert details.stack_id == "stack-id"
         assert details.job_operation_details.execution_plan_strategy == "AUTO_APPROVED"
 
 
@@ -182,16 +183,18 @@ class TestDeployNetworkingStack:
 class TestDeployComputeStack:
     def test_returns_existing_id(self, mock_tfvars_path):
         mock_rm = MagicMock()
+        mock_vnet = MagicMock()
         result = main.deploy_compute_stack(
-            mock_rm, "comp-id", {}, "net-stack-id", existing_id="existing-comp-id"
+            mock_rm, mock_vnet, "comp-id", {}, "net-stack-id", existing_id="existing-comp-id"
         )
         assert result == "existing-comp-id"
         mock_rm.create_stack.assert_not_called()
 
     def test_creates_new_stack(self, mock_tfvars_path):
         mock_rm = MagicMock()
+        mock_vnet = MagicMock()
         mock_state = MagicMock()
-        mock_state.outputs = {"subnet_display_name": MagicMock(value="subnet-test")}
+        mock_state.outputs = {"subnet_id": MagicMock(value="subnet-ocid-123")}
         mock_rm.get_stack.return_value = MagicMock(data=MagicMock(terraform_state=mock_state))
         mock_rm.create_stack.return_value = MagicMock(data=MagicMock(id="new-comp-stack"))
 
@@ -205,9 +208,33 @@ class TestDeployComputeStack:
             "assign_public_ip": True,
         }
 
-        result = main.deploy_compute_stack(mock_rm, "comp-id", tfvars, "net-stack-id")
+        result = main.deploy_compute_stack(mock_rm, mock_vnet, "comp-id", tfvars, "net-stack-id")
         assert result == "new-comp-stack"
         mock_rm.create_stack.assert_called_once()
+        details = mock_rm.create_stack.call_args[1]["create_stack_details"]
+        assert details.variables["subnet_id"] == "subnet-ocid-123"
+
+    def test_falls_back_to_list_subnets(self, mock_tfvars_path):
+        mock_rm = MagicMock()
+        mock_vnet = MagicMock()
+        mock_rm.get_stack.return_value = MagicMock(data=MagicMock(terraform_state=None))
+        mock_rm.create_stack.return_value = MagicMock(data=MagicMock(id="new-comp-stack"))
+        mock_subnet = MagicMock()
+        mock_subnet.id = "ocid1.subnet.oc1.iad.test"
+        mock_vnet.list_subnets.return_value = MagicMock(data=[mock_subnet])
+
+        tfvars = {
+            "region": "us-ashburn-1",
+            "compartment_id": "comp-id",
+            "instance_name": "testvm",
+            "instance_shape": "VM.Standard.A1.Flex",
+        }
+
+        result = main.deploy_compute_stack(mock_rm, mock_vnet, "comp-id", tfvars, "net-stack-id")
+        assert result == "new-comp-stack"
+        mock_vnet.list_subnets.assert_called_once_with(compartment_id="comp-id")
+        details = mock_rm.create_stack.call_args[1]["create_stack_details"]
+        assert details.variables["subnet_id"] == "ocid1.subnet.oc1.iad.test"
 
 
 class TestRetryComputeLoop:

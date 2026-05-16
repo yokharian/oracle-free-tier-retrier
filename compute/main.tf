@@ -11,12 +11,6 @@ provider "oci" {
   region = var.region
 }
 
-data "oci_core_subnet" "target" {
-  compartment_id = var.compartment_id
-  display_name   = var.subnet_display_name
-  state          = "AVAILABLE"
-}
-
 resource "oci_core_instance" "main" {
   agent_config {
     is_management_disabled = false
@@ -83,7 +77,7 @@ resource "oci_core_instance" "main" {
     assign_private_dns_record = true
     assign_public_ip          = var.assign_public_ip
     display_name              = "${var.instance_name}-vnic"
-    subnet_id                 = data.oci_core_subnet.target.id
+    subnet_id                 = var.subnet_id
   }
 
   instance_options {

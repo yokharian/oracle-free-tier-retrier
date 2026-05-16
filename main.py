@@ -193,8 +193,8 @@ def apply_stack(rm, stack_id):
         execution_plan_strategy="AUTO_APPROVED",
     )
     response = rm.create_job(
-        stack_id=stack_id,
         create_job_details=oci.resource_manager.models.CreateJobDetails(
+            stack_id=stack_id,
             job_operation_details=details,
         ),
     )
@@ -249,7 +249,17 @@ def get_stack_outputs(rm, stack_id):
     """Get terraform outputs from a stack."""
     try:
         response = rm.get_stack(stack_id=stack_id)
-        outputs = response.data.terraform_state.outputs if response.data.terraform_state else {}
+        if not response.data.terraform_state:
+            return {}
+        raw = response.data.terraform_state.outputs
+        if not raw:
+            return {}
+        outputs = {}
+        for key, val in raw.items():
+            if hasattr(val, "value"):
+                outputs[key] = val.value
+            else:
+                outputs[key] = val
         return outputs
     except Exception:
         return {}
@@ -286,7 +296,7 @@ def deploy_networking_stack(rm, compartment_id, tfvars, existing_id=None):
     return stack_id
 
 
-def deploy_compute_stack(rm, compartment_id, tfvars, net_stack_id, existing_id=None):
+def deploy_compute_stack(rm, vnet, compartment_id, tfvars, net_stack_id, existing_id=None):
     """Deploy compute via Resource Manager."""
     if existing_id:
         log_warn(f"Using existing compute stack: {existing_id}")
@@ -294,15 +304,18 @@ def deploy_compute_stack(rm, compartment_id, tfvars, net_stack_id, existing_id=N
 
     log_warn("Fetching networking outputs...")
     outputs = get_stack_outputs(rm, net_stack_id)
-    subnet_name = None
-    for key, val in outputs.items():
-        if key == "subnet_display_name":
-            subnet_name = val.value if hasattr(val, "value") else val
-            break
-    if not subnet_name:
-        log_error("ERROR: Could not get subnet_display_name from networking outputs.")
-        sys.exit(1)
-    log_info(f"  Subnet: {subnet_name}")
+    subnet_id = outputs.get("subnet_id") or outputs.get("subnet_display_name")
+
+    if not subnet_id:
+        log_warn("Networking outputs not available, fetching subnet from compartment...")
+        subnets = vnet.list_subnets(compartment_id=compartment_id).data
+        if not subnets:
+            log_error("ERROR: No subnets found in compartment and networking outputs unavailable.")
+            sys.exit(1)
+        subnet_id = subnets[0].id
+        log_info(f"  Using first available subnet: {subnet_id}")
+    else:
+        log_info(f"  Subnet: {subnet_id}")
 
     tfvars_path = SCRIPT_DIR / "compute" / "terraform.tfvars"
     lines = []
@@ -313,11 +326,11 @@ def deploy_compute_stack(rm, compartment_id, tfvars, net_stack_id, existing_id=N
             lines.append(f'{key} = {val}')
         elif val is not None:
             lines.append(f'{key} = "{val}"')
-    lines.append(f'subnet_display_name = "{subnet_name}"')
+    lines.append(f'subnet_id = "{subnet_id}"')
     tfvars_path.write_text("\n".join(lines) + "\n")
 
     zip_bytes = zip_module(SCRIPT_DIR / "compute")
-    variables = {"subnet_display_name": subnet_name}
+    variables = {"subnet_id": subnet_id}
     stack_id = create_rm_stack(
         rm, compartment_id, "compute-stack",
         "Compute instance with AD retry", zip_bytes, variables,
@@ -410,7 +423,7 @@ def terraform(net_stack_id, comp_stack_id):
     compartment_id = tfvars.get("compartment_id")
     validate_compartment_id(compartment_id)
 
-    _, identity, compute, _, _, _, rm, _ = get_clients()
+    _, identity, compute, _, vnet, _, rm, _ = get_clients()
 
     # Get ADs
     log_warn("Fetching all Availability Domains...")
@@ -431,7 +444,7 @@ def terraform(net_stack_id, comp_stack_id):
     # Compute
     click.echo(f"{CYAN}=== Compute Stack ==={NC}")
     existing_comp = comp_stack_id or env.get("OCI_COMPUTE_STACK_ID")
-    comp_id = deploy_compute_stack(rm, compartment_id, tfvars, net_id, existing_comp)
+    comp_id = deploy_compute_stack(rm, vnet, compartment_id, tfvars, net_id, existing_comp)
 
     click.echo("")
     click.echo(f"{CYAN}=== Stack IDs ==={NC}")
