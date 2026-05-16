@@ -598,22 +598,22 @@ deploy_cli_networking() {
 }
 
 prompt_image() {
-    log_warn "Fetching Oracle Linux images..."
-    images=$(oci compute image list --compartment-id "$COMPARTMENT_ID" --operating-system "Oracle Linux" --sort-by TIMECREATED --sort-order DESC --all 2>/dev/null)
+    log_warn "Fetching Ubuntu images..."
+    images=$(oci compute image list --compartment-id "$COMPARTMENT_ID" --operating-system "Canonical Ubuntu" --sort-by TIMECREATED --sort-order DESC --all 2>/dev/null)
 
     if [ -z "$images" ] || [ "$(echo "$images" | jq '.data | length')" -eq 0 ]; then
-        log_error "Error: No Oracle Linux images found."
+        log_error "Error: No Canonical Ubuntu images found."
         exit 1
     fi
 
     echo ""
-    printf "Available Oracle Linux images (showing top 10):\n"
+    printf "Available Canonical Ubuntu images (showing top 10):\n"
     echo "$images" | jq -r '.data[:10] | .[] | "\(.["display-name"]) [\(.id)]"' | nl -w2 -s') '
 
     read -p "Select image number (1-10): " choice
 
     IMAGE_ID=$(echo "$images" | jq -r ".data[$((choice-1))].id")
-    IMAGE_NAME=$(echo "$images" | jq -r ".data[$((choice-1))]['display-name']")
+    IMAGE_NAME=$(echo "$images" | jq -r ".data[$((choice-1))].\"display-name\"")
     log_info "Selected: $IMAGE_NAME"
     echo ""
 }
@@ -690,53 +690,83 @@ deploy_cli() {
     log_info "Launching instances..."
     echo ""
 
-    success=0
-    failed=0
-    results=""
+    declare -a CREATED_ADS=()
+    declare -a CREATED_IDS=()
+    declare -a FAILED_ADS=()
 
-    for i in $(seq 0 $((ad_count - 1))); do
-        ad_name=$(echo "$ads" | jq -r ".data[$i].name")
-        instance_name="${INSTANCE_PREFIX}-$((i+1))"
+    while [[ ${#CREATED_ADS[@]} -lt $ad_count ]]; do
+        for i in $(seq 0 $((ad_count - 1))); do
+            ad_name=$(echo "$ads" | jq -r ".data[$i].name")
 
-        log_warn "[$((i+1))/$ad_count] Launching $instance_name in $ad_name..."
+            # Skip already created
+            already_created=false
+            for created in "${CREATED_ADS[@]+"${CREATED_ADS[@]}"}"; do
+                if [[ "$created" == "$ad_name" ]]; then
+                    already_created=true
+                    break
+                fi
+            done
+            if $already_created; then
+                log_info "Skipping $ad_name (already created)"
+                continue
+            fi
 
-        launch_cmd=(
-            oci compute instance launch
-            --availability-domain "$ad_name"
-            --compartment-id "$COMPARTMENT_ID"
-            --shape "$SHAPE"
-            --subnet-id "$SUBNET_ID"
-            --image-id "$IMAGE_ID"
-            --display-name "$instance_name"
-            --shape-config "{\"ocpus\": $OCPUS, \"memory_in_gbs\": $MEMORY}"
-            --assign-public-ip true
-            --wait-for-state RUNNING
-            --max-wait-seconds 600
-        )
+            instance_name="${INSTANCE_PREFIX}-$(echo "$ad_name" | sed 's/.*AD-\([0-9]\)/\1/')"
 
-        if [ -n "$SSH_PUBLIC_KEY" ]; then
-            launch_cmd+=(--metadata "{\"ssh_authorized_keys\": \"$SSH_PUBLIC_KEY\"}")
+            log_warn "Launching $instance_name in $ad_name..."
+
+            launch_cmd=(
+                oci compute instance launch
+                --availability-domain "$ad_name"
+                --compartment-id "$COMPARTMENT_ID"
+                --shape "$SHAPE"
+                --subnet-id "$SUBNET_ID"
+                --image-id "$IMAGE_ID"
+                --display-name "$instance_name"
+                --shape-config "{\"ocpus\": $OCPUS, \"memory_in_gbs\": $MEMORY}"
+                --assign-public-ip true
+                --wait-for-state RUNNING
+                --max-wait-seconds 600
+            )
+
+            if [ -n "$SSH_PUBLIC_KEY" ]; then
+                launch_cmd+=(--metadata "{\"ssh_authorized_keys\": \"$SSH_PUBLIC_KEY\"}")
+            fi
+
+            set +e
+            output=$("${launch_cmd[@]}" 2>&1)
+            rc=$?
+            set -e
+
+            if [[ $rc -eq 0 ]]; then
+                instance_ocid=$(echo "$output" | jq -r '.data.id')
+                CREATED_ADS+=("$ad_name")
+                CREATED_IDS+=("$instance_ocid")
+                log_info "  $instance_name created: $instance_ocid"
+            else
+                FAILED_ADS+=("$ad_name")
+                log_error "  Failed to create $instance_name in $ad_name"
+                echo "$output" | tail -5
+            fi
+            echo ""
+        done
+
+        # Check if all succeeded
+        if [[ ${#CREATED_ADS[@]} -lt $ad_count ]]; then
+            log_warn "${#FAILED_ADS[@]} AD(s) failed. Retrying in ${SLEEP_SECONDS}s..."
+            log_warn "Failed ADs: ${FAILED_ADS[*]}"
+            FAILED_ADS=()
+            sleep "$SLEEP_SECONDS"
         fi
-
-        if output=$("${launch_cmd[@]}" 2>&1); then
-            instance_ocid=$(echo "$output" | jq -r '.data.id')
-            log_info "  $instance_name created: $instance_ocid"
-            results+="$instance_name: $instance_ocid (SUCCESS)\n"
-            ((success++)) || true
-        else
-            log_error "  Failed to create $instance_name"
-            results+="$instance_name: FAILED\n"
-            ((failed++)) || true
-        fi
-        echo ""
     done
 
     log_info "=== Summary ==="
-    printf "Successful: %s\n" "$success"
-    printf "Failed: %s\n" "$failed"
+    printf "Successful: %d\n" "${#CREATED_ADS[@]}"
     echo ""
     printf "Instance Details:\n"
-    printf "%b" "$results"
+    for idx in "${!CREATED_ADS[@]}"; do
+        printf "  %s: %s\n" "${CREATED_ADS[$idx]}" "${CREATED_IDS[$idx]}"
+    done
 }
 
 # ==========================================
