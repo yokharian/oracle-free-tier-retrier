@@ -626,8 +626,8 @@ prompt_shape_config() {
     read -p "OCPUs (default: 1): " ocpus
     OCPUS=${ocpus:-1}
 
-    read -p "Memory in GBs (default: 4): " memory
-    MEMORY=${memory:-4}
+    read -p "Memory in GBs (default: 6): " memory
+    MEMORY=${memory:-6}
 
     log_info "Shape: $SHAPE, OCPUs: $OCPUS, Memory: ${MEMORY}GB"
     echo ""
