@@ -1,6 +1,6 @@
 # OCI VM Instance Generator
 
-Deploy VM instances on Oracle Cloud Infrastructure (OCI) Free Tier across all Availability Domains. Two deployment methods available: Terraform via Resource Manager or OCI CLI directly.
+Deploy VM instances on Oracle Cloud Infrastructure (OCI) Free Tier across all Availability Domains. Two deployment methods available: Terraform via Resource Manager or OCI SDK directly.
 
 ## OCI Free Tier
 
@@ -16,43 +16,65 @@ Available in select regions: `us-ashburn-1` (US East), `eu-frankfurt-1` (EU Cent
 ## Prerequisites
 
 - [OCI CLI](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/cliconcepts.htm) installed and configured (`oci setup config`)
-- `jq` installed
-- `zip` installed
+- Python 3.8+
 
 ## Quick Start
 
-1. Configure your values:
+1. Install dependencies:
+   ```bash
+   pip install oci click
+   ```
+
+2. Configure your values:
    ```bash
    cp terraform.tfvars.example terraform.tfvars
    # Edit terraform.tfvars with your compartment OCID, image ID, SSH key, etc.
    ```
 
-2. Run the script:
+3. Run the CLI:
    ```bash
-   ./main.sh
+   python main.py --help
    ```
 
-3. Choose a deployment method from the menu.
+## CLI Commands
 
-## Deployment Options
+| Command | Description |
+|---------|-------------|
+| `python main.py terraform` | Deploy using Terraform via Resource Manager with automatic AD retry |
+| `python main.py direct` | Deploy VMs directly via OCI SDK with interactive prompts |
+| `python main.py destroy` | Tear down Resource Manager stacks |
 
-| Option | Description |
-|--------|-------------|
-| **1 — Terraform (Resource Manager)** | Creates managed stacks with automatic retry across Availability Domains on capacity errors. Best for production. |
-| **2 — OCI CLI Direct** | Creates VMs in each AD directly. Retries across all ADs if capacity is unavailable. No state management. |
-| **3 — Destroy Stacks** | Finds and deletes Resource Manager stacks by name. |
+Each command accepts `--help` for available options.
 
-### Option 1 Workflow
+### Terraform Command
+```bash
+python main.py terraform [--net-stack-id OCID] [--comp-stack-id OCID]
+```
+
+**Workflow:**
 1. Deploys networking (VCN, subnet, IGW, route table) via Resource Manager
 2. Deploys compute stack with SSH key and subnet reference
 3. Retries across all Availability Domains if capacity is unavailable
-4. Prints stack OCIDs — save them to `.env` for subsequent runs
+4. Saves stack OCIDs to `.env` for subsequent runs
 
-### Option 2 Workflow
-1. Selects compartment, subnet, image, and shape interactively
-2. If no subnet exists, offers to deploy one via Terraform
+### Direct Command
+```bash
+python main.py direct [--compartment-id OCID] [--subnet-id OCID] [--image-id OCID] \
+    [--shape SHAPE] [--ocpus N] [--memory N] [--ssh-key PATH] [--name PREFIX]
+```
+
+**Workflow:**
+1. Interactively selects compartment, subnet, image, and shape (or use CLI flags)
+2. If no subnet exists, offers to deploy VCN + subnet via OCI SDK
 3. Creates one VM per Availability Domain, retrying on failure
 4. No state tracking
+
+### Destroy Command
+```bash
+python main.py destroy [--net-stack-id OCID] [--comp-stack-id OCID]
+```
+
+Reads stack OCIDs from `.env` or accepts them via flags.
 
 ## Configuration
 
@@ -73,13 +95,31 @@ OCI_NETWORKING_STACK_ID=ocid1.ormstack.oc1...
 OCI_COMPUTE_STACK_ID=ocid1.ormstack.oc1...
 ```
 
+## Development
+
+```bash
+# Install with dev dependencies
+pip install -e ".[dev]"
+
+# Run tests
+pytest tests/ -v
+```
+
 ## Project Structure
 
 ```
-├── main.sh                    # Main deployment script
+├── main.py                    # Main CLI (Click + OCI SDK)
+├── pyproject.toml             # Project metadata, dependencies, pytest config
 ├── terraform.tfvars           # Your values (gitignored)
 ├── terraform.tfvars.example   # Template with placeholders
 ├── .env.example               # Optional stack OCIDs template
+├── tests/                     # Pytest test suite
+│   ├── conftest.py
+│   ├── test_config.py
+│   ├── test_utils.py
+│   ├── test_compute.py
+│   ├── test_resource_manager.py
+│   └── test_cli.py
 ├── networking/                # Terraform: VCN, subnet, IGW, route table
 │   ├── main.tf
 │   └── variables.tf
@@ -93,6 +133,6 @@ OCI_COMPUTE_STACK_ID=ocid1.ormstack.oc1...
 | Issue | Solution |
 |-------|----------|
 | `NotAuthorizedOrNotFound` | Verify `compartment_id` is correct in `terraform.tfvars` |
-| `Config source must be a .zip file` | Ensure `zip` is installed (`apt install zip` / `brew install zip`) |
-| `No subnets found` | Option 2 will offer to deploy networking automatically |
-| `Out of capacity` | Both options retry across all ADs automatically |
+| `list_subnets got unknown kwargs` | Ensure `oci` SDK is up to date (`pip install --upgrade oci`) |
+| `No subnets found` | Direct command will offer to deploy VCN + subnet automatically |
+| `Out of capacity` | Both commands retry across all ADs automatically (900s interval) |
