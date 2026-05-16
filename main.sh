@@ -237,25 +237,31 @@ deploy_networking() {
     zip_module "$SCRIPT_DIR/networking" "$zip_path"
 
     printf "Creating new networking stack...\n"
-    local stack_id
-    stack_id=$(oci resource-manager stack create \
+    local stack_result
+    if ! stack_result=$(oci resource-manager stack create \
         --compartment-id "$compartment_id" \
         --config-source "$zip_path" \
         --display-name "networking-stack" \
         --description "VCN, subnet, IGW, route table" \
         --query 'data.id' \
-        --raw-output)
-    printf "  Stack created: %s\n" "$stack_id"
+        --raw-output 2>&1); then
+        log_error "Failed to create networking stack."
+        log_error "Output: $stack_result"
+        log_error "Tip: Run with --debug for more details: oci resource-manager stack create --debug ..."
+        rm -f "$zip_path"
+        exit 1
+    fi
+    printf "  Stack created: %s\n" "$stack_result"
     rm -f "$zip_path"
 
     printf "Applying networking stack...\n"
-    create_apply_job "$stack_id"
-    if ! wait_for_job "$stack_id"; then
+    create_apply_job "$stack_result"
+    if ! wait_for_job "$stack_result"; then
         log_error "Networking stack failed."
         exit 1
     fi
     log_info "  Networking applied successfully."
-    echo "$stack_id"
+    echo "$stack_result"
 }
 
 deploy_compute() {
@@ -265,7 +271,10 @@ deploy_compute() {
 
     printf "Fetching networking outputs...\n"
     local outputs
-    outputs=$(get_stack_outputs "$net_stack_id")
+    outputs=$(get_stack_outputs "$net_stack_id") || {
+        log_error "Failed to fetch networking stack outputs."
+        exit 1
+    }
     local subnet_name
     subnet_name=$(get_output_value "$outputs" "subnet_display_name")
 
@@ -283,18 +292,24 @@ deploy_compute() {
     zip_module "$SCRIPT_DIR/compute" "$zip_path"
 
     printf "Creating new compute stack...\n"
-    local stack_id
-    stack_id=$(oci resource-manager stack create \
+    local stack_result
+    if ! stack_result=$(oci resource-manager stack create \
         --compartment-id "$compartment_id" \
         --config-source "$zip_path" \
         --display-name "compute-stack" \
         --description "Compute instance with AD retry" \
         --variables "{\"subnet_display_name\":\"$subnet_name\"}" \
         --query 'data.id' \
-        --raw-output)
-    printf "  Stack created: %s\n" "$stack_id"
+        --raw-output 2>&1); then
+        log_error "Failed to create compute stack."
+        log_error "Output: $stack_result"
+        log_error "Tip: Run with --debug for more details: oci resource-manager stack create --debug ..."
+        rm -f "$zip_path"
+        exit 1
+    fi
+    printf "  Stack created: %s\n" "$stack_result"
     rm -f "$zip_path"
-    echo "$stack_id"
+    echo "$stack_result"
 }
 
 destroy_stacks() {
@@ -541,26 +556,32 @@ deploy_cli_networking() {
     compartment_id=$(get_compartment_id)
 
     printf "Creating networking stack...\n"
-    local stack_id
-    stack_id=$(oci resource-manager stack create \
+    local stack_result
+    if ! stack_result=$(oci resource-manager stack create \
         --compartment-id "$compartment_id" \
         --config-source "$zip_path" \
         --display-name "networking-stack" \
         --description "VCN, subnet, IGW, route table" \
         --query 'data.id' \
-        --raw-output)
-    printf "  Stack created: %s\n" "$stack_id"
+        --raw-output 2>&1); then
+        log_error "Failed to create networking stack."
+        log_error "Output: $stack_result"
+        log_error "Tip: Run with --debug for more details: oci resource-manager stack create --debug ..."
+        rm -f "$zip_path"
+        exit 1
+    fi
+    printf "  Stack created: %s\n" "$stack_result"
     rm -f "$zip_path"
 
     printf "Applying networking stack...\n"
     oci resource-manager job create-apply-job \
-        --stack-id "$stack_id" \
+        --stack-id "$stack_result" \
         --execution-plan-strategy AUTO_APPROVED >/dev/null
 
     while true; do
         local state
         state=$(oci resource-manager job list \
-            --stack-id "$stack_id" \
+            --stack-id "$stack_result" \
             --sort-by TIMECREATED \
             --sort-order DESC \
             --limit 1 \
@@ -581,7 +602,7 @@ deploy_cli_networking() {
 
     local subnet_id
     subnet_id=$(oci resource-manager stack get \
-        --stack-id "$stack_id" \
+        --stack-id "$stack_result" \
         --query 'data."terraform-state".outputs.subnet_id.value' \
         --raw-output 2>/dev/null)
 
@@ -590,8 +611,8 @@ deploy_cli_networking() {
         exit 1
     fi
 
-    printf "\nNetworking stack OCID: %s\n" "$stack_id"
-    printf "Add to .env for future use: OCI_NETWORKING_STACK_ID=%s\n\n" "$stack_id"
+    printf "\nNetworking stack OCID: %s\n" "$stack_result"
+    printf "Add to .env for future use: OCI_NETWORKING_STACK_ID=%s\n\n" "$stack_result"
 
     log_info "Subnet created: $subnet_id"
     echo "$subnet_id"
