@@ -6,3 +6,4 @@ networking/terraform.tfvars
 compute/terraform.tfvars
 *.key.pub
 *.key
+.venv/
