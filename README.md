@@ -25,17 +25,28 @@ npm install -g oci-free-vm
 ## Requirements
 
 - Node.js >= 20 or Bun
-- OCI CLI/configuration (`~/.oci/config`)
+- The Oracle Cloud CLI, installed from <https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm> (Windows, macOS, and Linux instructions there)
+- OCI configuration (`~/.oci/config`), created with `oci setup config`
 - Permissions to create OCI instances
+
+Works on **Windows** (10+, PowerShell / Windows Terminal), **macOS** (Apple Silicon and Intel), and **Linux** (x64 and ARM64). All filesystem operations use the Node/Bun APIs — no bash, sed, awk, or grep required.
 
 ## Basic setup
 
-```bash
-oci setup config
-bunx oci-free-vm
-```
+1. Install the Oracle Cloud CLI from <https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm>.
+2. Create your OCI configuration:
 
-The CLI reads your existing OCI configuration; you never copy credentials into the tool.
+   ```bash
+   oci setup config
+   ```
+
+3. Run the deployer:
+
+   ```bash
+   bunx oci-free-vm
+   ```
+
+The CLI checks for the OCI CLI and `~/.oci/config` before doing anything else and tells you exactly what is missing. It reads your existing OCI configuration; you never copy credentials into the tool.
 
 ## Usage
 
@@ -152,7 +163,8 @@ Filenames are filesystem-safe on macOS, Linux, and Windows. Each log records the
 
 ## Troubleshooting
 
-- **`OCI configuration not found`** — run `oci setup config` first, then `bunx oci-free-vm`.
+- **`OCI configuration not found`** — the CLI also checks for the Oracle Cloud CLI; if it is missing, install it from <https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm>, then run `oci setup config`, then `bunx oci-free-vm`.
+- **`Authorization failed or requested resource not found` (ListVcns / ListSubnets)** — your OCI login is valid, but the user in `~/.oci/config` is not allowed to list VCNs in the selected compartment, or the compartment OCID is wrong. Cross-check with the official CLI (`oci network vcn list --compartment-id <ocid>`), pick a different compartment, or fix the IAM policy.
 - **`not retryable` errors** — check the reported reason and the latest file in `oci-free-vm-logs/`.
 - **Instance already exists** — the CLI detects existing instances by name and does nothing.
 - **Non-interactive environments** — use `--json`; every required value must come from CLI flags or the YAML file.
