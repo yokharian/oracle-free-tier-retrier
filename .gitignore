@@ -1,9 +1,0 @@
-.idea
-terraform.tfvars
-.env
-*.zip
-networking/terraform.tfvars
-compute/terraform.tfvars
-*.key.pub
-*.key
-.venv/
