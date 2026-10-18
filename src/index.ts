@@ -252,7 +252,7 @@ export async function loadYamlConfig(path: string): Promise<{ data: YamlConfig; 
     const where = issue === undefined ? '' : ` (${issue.path.join('.')}: ${issue.message})`;
     throw new ConfigError(`${path}: invalid configuration${where}`);
   }
-  return { data: result.data, raw: (parsed as Record<string, unknown>) ?? {} };
+  return { data: result.data, raw: result.data };
 }
 
 export async function saveYamlConfig(
@@ -1273,11 +1273,31 @@ async function buildPlanInteractive(
     );
   }
   const shapeIsFlex = isFlexShape(shape);
-  const { ocpus, memoryGbs } = validateFlexResources(
-    shapeIsFlex,
-    resolved.ocpus ?? APP_DEFAULTS.ocpus,
-    resolved.memoryGbs ?? APP_DEFAULTS.memoryGbs,
-  );
+  const ocpusInput =
+    shapeIsFlex && resolved.ocpus === null
+      ? Number(
+          await io.text('OCPUs', {
+            initial: String(APP_DEFAULTS.ocpus),
+            validate: (v) => {
+              const n = Number(v);
+              return Number.isInteger(n) && n >= 1 && n <= LIMITS.ocpusMax ? undefined : `OCPUs must be an integer between 1 and ${LIMITS.ocpusMax}`;
+            },
+          }),
+        )
+      : resolved.ocpus;
+  const memoryInput =
+    shapeIsFlex && resolved.memoryGbs === null
+      ? Number(
+          await io.text('Memory (GB)', {
+            initial: String(APP_DEFAULTS.memoryGbs),
+            validate: (v) => {
+              const n = Number(v);
+              return Number.isFinite(n) && n >= 1 && n <= LIMITS.memoryMaxGbs ? undefined : `memory must be between 1 and ${LIMITS.memoryMaxGbs} GB`;
+            },
+          }),
+        )
+      : resolved.memoryGbs;
+  const { ocpus, memoryGbs } = validateFlexResources(shapeIsFlex, ocpusInput, memoryInput);
 
   const diskGbs = validateDisk(
     resolved.diskGbs ??
@@ -1561,13 +1581,13 @@ export async function deployWithRetry(
       }
     }
 
+    await deps.onCycleFailed(lastMessage, lastCode);
     deps.io.message('\nNo Availability Domain currently has capacity.\n');
     deps.io.message(`Retrying in ${humanizeInterval(intervalSeconds)}.\n`);
     deps.io.message(`  Attempt:       ${attempt}`);
     deps.io.message(`  Last error:    ${lastMessage}`);
     deps.io.message(`  Next retry:    ${formatNextRetry(deps.now(), intervalSeconds)}\n`);
     deps.io.message('Press Ctrl+C to stop.\n');
-    await deps.onCycleFailed(lastMessage, lastCode);
     await deps.sleep(intervalSeconds * 1000, deps.signal);
     if (deps.signal?.aborted) return { kind: 'cancelled', logPath: lastLogPath };
   }
@@ -1687,10 +1707,12 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
         logsDir,
         onCycleFailed: async (message, code) => {
           if (plan !== null && loaded !== null) {
+            const lastError: LastErrorOut = { timestamp: now().toISOString(), code, message };
+            loaded = { raw: loaded.raw, data: { ...loaded.data, last_error: lastError } };
             await saveYamlConfig(configPath, loaded.raw, {
               defaults: buildDefaultsOut(plan, plan.region, network),
               state: loaded.data.state ?? {},
-              last_error: { timestamp: now().toISOString(), code, message },
+              last_error: lastError,
             });
           }
         },

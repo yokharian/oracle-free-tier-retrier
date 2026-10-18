@@ -5,7 +5,6 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
-import type { AddressInfo } from 'node:net';
 import process from 'node:process';
 import {
   ConfigError,
@@ -95,7 +94,7 @@ class MockOci {
       });
       throw new Error('mock server did not get a port');
     }
-    instance = new MockOci(server, `http://127.0.0.1:${(address as AddressInfo).port}`);
+    instance = new MockOci(server, `http://127.0.0.1:${address.port}`);
     return instance;
   }
 
