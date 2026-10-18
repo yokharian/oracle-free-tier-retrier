@@ -1,6 +1,6 @@
 {
   "name": "oci-free-vm",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Deploy an OCI VM and automatically retry when capacity is unavailable.",
   "type": "module",
   "license": "MIT",
