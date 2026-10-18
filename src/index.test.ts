@@ -21,6 +21,7 @@ import {
   loadYamlConfig,
   parseCliArgs,
   parseOciConfigText,
+  probeBinary,
   projectStorage,
   resolveConfig,
   run,
@@ -335,6 +336,22 @@ describe('classifyFailure', () => {
     const unexpected = classifyFailure(new Error('boom'));
     assert.equal(unexpected.code, 'UNEXPECTED');
     assert.equal(unexpected.exitCode, 5);
+  });
+});
+
+describe('OCI authorization semantics', () => {
+  it('maps NotAuthorizedOrNotFound (404) to auth exit 3', () => {
+    const failure = classifyFailure(new OciHttpError('ListVcns', 404, 'NotAuthorizedOrNotFound', 'Authorization failed or requested resource not found.'));
+    assert.equal(failure.kind, 'auth');
+    assert.equal(failure.exitCode, 3);
+    assert.equal(failure.retryable, false);
+  });
+});
+
+describe('probeBinary', () => {
+  it('detects present and absent binaries', () => {
+    assert.equal(probeBinary('node'), true);
+    assert.equal(probeBinary('oci-free-vm-nonexistent-binary-xyz'), false);
   });
 });
 

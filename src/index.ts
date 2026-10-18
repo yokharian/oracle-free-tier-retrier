@@ -9,6 +9,7 @@ import type { KeyObject } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import process from 'node:process';
@@ -121,6 +122,9 @@ export function classifyFailure(error: unknown): Failure {
     return { kind: 'transient', retryable: true, exitCode: EXIT.deployFailed, code: 'TRANSIENT', message: error.message };
   }
   if (error instanceof OciHttpError) {
+    if (error.code === 'NotAuthorizedOrNotFound') {
+      return { kind: 'auth', retryable: false, exitCode: EXIT.auth, code: 'AUTH', message: `${error.operation}: ${error.message}` };
+    }
     const text = `${error.code ?? ''} ${error.message}`.toLowerCase();
     const failure: Omit<Failure, 'message'> = /out of (host )?capacity/.test(text)
       ? { kind: 'capacity', retryable: true, exitCode: EXIT.deployFailed, code: 'OUT_OF_CAPACITY' }
@@ -149,11 +153,11 @@ function failureAdvice(kind: FailureKind): string {
     case 'transient':
       return 'Transient OCI or network failures are retried automatically.';
     case 'auth':
-      return 'Check your OCI permissions and configuration.';
+      return 'Your OCI login is valid, but the user lacks permission for this operation in the selected compartment, or the OCID is wrong. Check the IAM policy, or select a different compartment.';
     case 'invalid':
       return 'Fix the reported configuration value and run again.';
     case 'fatal':
-      return 'Check the attempt log for details.';
+      return 'This error is not retryable.';
     default:
       return assertNever(kind);
   }
@@ -520,6 +524,11 @@ export async function loadOciAuth(profileName: string | undefined): Promise<OciA
     keyFile,
     privateKey,
   };
+}
+
+export function probeBinary(name: string): boolean {
+  const result = spawnSync(name, ['--version'], { stdio: 'ignore' });
+  return result.error === undefined;
 }
 
 // -------------------------------------------------------------- request signing
@@ -1812,6 +1821,10 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
     }
     if (error instanceof OciConfigError) {
       io.error('OCI configuration not found.\n');
+      if (!probeBinary('oci')) {
+        io.message('The OCI CLI is not installed. Install it first:\n');
+        io.message('  https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm\n');
+      }
       io.message('Configure OCI first:\n');
       io.message('  oci setup config\n');
       io.message('\nThen run:\n');
@@ -1819,9 +1832,14 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
     } else {
       io.error(failure.message);
       io.message(`${failureAdvice(failure.kind)}\n`);
+      if (lastLogPath !== null) io.message(`Attempt log:\n  ${lastLogPath}`);
     }
     if (cli.jsonMode) {
-      writeJson({ error: { code: failure.code, message: failure.message } });
+      const cliHint =
+        error instanceof OciConfigError && !probeBinary('oci')
+          ? ' Install the OCI CLI first: https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm'
+          : '';
+      writeJson({ error: { code: failure.code, message: `${failure.message}${cliHint}` } });
     } else {
       io.outro('Failed.');
     }
