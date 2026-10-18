@@ -10,7 +10,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import process from 'node:process';
 import * as p from '@clack/prompts';
@@ -20,7 +20,20 @@ import { z } from 'zod';
 
 // ------------------------------------------------------------------ constants
 
-const APP = { name: 'oci-free-vm', version: '0.1.0' } as const;
+const APP = { name: 'oci-free-vm' } as const;
+
+let cachedAppVersion: string | undefined;
+
+export function appVersion(): string {
+  if (cachedAppVersion === undefined) {
+    const parsed: unknown = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    if (parsed === null || typeof parsed !== 'object' || !('version' in parsed) || typeof parsed.version !== 'string') {
+      throw new Error('package.json has no valid version');
+    }
+    cachedAppVersion = parsed.version;
+  }
+  return cachedAppVersion;
+}
 
 const DEFAULT_CONFIG_FILE = 'oci-free-vm.yaml';
 const LOGS_DIR = 'oci-free-vm-logs';
@@ -413,7 +426,7 @@ export function parseCliArgs(argv: readonly string[]): CliOverrides {
 function printUsage(): void {
   process.stdout.write(
     [
-      `${APP.name} v${APP.version} — deploy an OCI VM and automatically retry when capacity is unavailable.`,
+      `${APP.name} v${appVersion()} — deploy an OCI VM and automatically retry when capacity is unavailable.`,
       '',
       'Usage:',
       '  oci-free-vm [options]',
@@ -1662,7 +1675,7 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
     const auth = await loadOciAuth(cli.profile);
     const oci = new Oci(auth, { fetchFn: deps.fetchFn, endpointOverride: deps.endpointOverride, now });
 
-    io.intro(`${APP.name} v${APP.version}`);
+    io.intro(`${APP.name} v${appVersion()}`);
     plan = cli.jsonMode ? await buildPlanJson(oci, auth, resolved) : await buildPlanInteractive(io, oci, auth, resolved);
 
     const allAds = await oci.listAvailabilityDomains(plan.compartmentId);
@@ -1969,7 +1982,7 @@ async function main(): Promise<void> {
     process.exit(EXIT.success);
   }
   if (cli.version) {
-    process.stdout.write(`${APP.version}\n`);
+    process.stdout.write(`${appVersion()}\n`);
     process.exit(EXIT.success);
   }
   const io = cli.jsonMode ? jsonIo() : interactiveIo();

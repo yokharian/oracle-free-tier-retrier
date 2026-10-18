@@ -12,6 +12,7 @@ import {
   Oci,
   OciConfigError,
   OciHttpError,
+  appVersion,
   attemptLogFileName,
   buildLaunchBody,
   buildSignedHeaders,
@@ -352,6 +353,12 @@ describe('probeBinary', () => {
   it('detects present and absent binaries', () => {
     assert.equal(probeBinary('node'), true);
     assert.equal(probeBinary('oci-free-vm-nonexistent-binary-xyz'), false);
+  });
+});
+
+describe('appVersion', () => {
+  it('reads the version from package.json instead of a hardcoded constant', () => {
+    assert.match(appVersion(), /^\d+\.\d+\.\d+$/);
   });
 });
 
