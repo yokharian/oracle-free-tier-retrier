@@ -1,6 +1,6 @@
 node_modules/
 dist/
-oci-vm.yaml
-oci-vm-logs/
+oci-free-vm.yaml
+oci-free-vm-logs/
 .DS_Store
 .idea/

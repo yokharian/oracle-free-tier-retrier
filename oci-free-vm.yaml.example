@@ -1,5 +1,5 @@
-# oci-vm configuration — copied to oci-vm.yaml next to wherever you run the CLI.
-# NOT a database: oci-vm persists your last-used configuration (defaults),
+# oci-free-vm configuration — copied to oci-free-vm.yaml next to wherever you run the CLI.
+# NOT a database: oci-free-vm persists your last-used configuration (defaults),
 # the last successful deployment (state), and the most recent error (last_error).
 # Manually pre-filled values become defaults; CLI arguments override them;
 # interactive prompts only ask for values that remain unresolved.

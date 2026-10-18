@@ -7,19 +7,19 @@ Local-first: OCI credentials stay on your machine — no backend, no database, n
 ## Installation
 
 ```bash
-npx oci-vm
+npx oci-free-vm
 ```
 
 or:
 
 ```bash
-bunx oci-vm
+bunx oci-free-vm
 ```
 
 Optional global installation also works:
 
 ```bash
-npm install -g oci-vm
+npm install -g oci-free-vm
 ```
 
 ## Requirements
@@ -32,14 +32,14 @@ npm install -g oci-vm
 
 ```bash
 oci setup config
-bunx oci-vm
+bunx oci-free-vm
 ```
 
 The CLI reads your existing OCI configuration; you never copy credentials into the tool.
 
 ## Usage
 
-Running `bunx oci-vm` starts an interactive flow:
+Running `bunx oci-free-vm` starts an interactive flow:
 
 1. selects a compartment,
 2. selects an existing VCN — or creates a new one with an internet gateway, an SSH ingress rule, and a subnet,
@@ -54,7 +54,7 @@ After confirmation it prepares the network, then attempts to launch the instance
 
 | Option | Description |
 | --- | --- |
-| `--config <path>` | configuration file (default `./oci-vm.yaml`) |
+| `--config <path>` | configuration file (default `./oci-free-vm.yaml`) |
 | `--profile <name>` | OCI config profile (default `DEFAULT`) |
 | `--json` | machine-readable JSON output, non-interactive |
 | `--yes` | skip confirmation prompts |
@@ -84,7 +84,7 @@ Configuration precedence: **CLI arguments > YAML defaults > interactive prompts 
 | 4 | User cancelled |
 | 5 | Unexpected error |
 
-## YAML configuration (`oci-vm.yaml`)
+## YAML configuration (`oci-free-vm.yaml`)
 
 The YAML file is **not a database**. It persists three things:
 
@@ -129,21 +129,21 @@ last_error:
   message: "Out of capacity"
 ```
 
-Copy `oci-vm.yaml.example` as a starting point, or just run the CLI — it writes the file after your first run. The file stays human-readable and manually editable, and the CLI never writes secrets to it. Run `oci-vm --config ./my-config.yaml` to use a different file.
+Copy `oci-free-vm.yaml.example` as a starting point, or just run the CLI — it writes the file after your first run. The file stays human-readable and manually editable, and the CLI never writes secrets to it. Run `oci-free-vm --config ./my-config.yaml` to use a different file.
 
 ## Retry behavior
 
 - All Availability Domains are tried in order on every cycle.
 - Capacity errors (`Out of capacity` / `Out of host capacity`), rate limits (429), transient 5xx responses, and network failures are retried automatically; authorization failures, invalid parameters, and other non-retryable errors abort immediately with guidance.
 - An instance-existence check runs before every cycle, so an interrupted or timed-out run never creates a duplicate instance.
-- Cancel at any time with Ctrl+C — no resources are ever deleted, and your last state is preserved in `oci-vm.yaml`.
+- Cancel at any time with Ctrl+C — no resources are ever deleted, and your last state is preserved in `oci-free-vm.yaml`.
 
 ## Logs
 
-Every infrastructure attempt writes its own log file under `oci-vm-logs/`:
+Every infrastructure attempt writes its own log file under `oci-free-vm-logs/`:
 
 ```
-oci-vm-logs/
+oci-free-vm-logs/
 ├── 2026-10-05T18-30-00-000Z-attempt-001-AD-1.log
 └── 2026-10-05T18-30-05-000Z-attempt-002-AD-2.log
 ```
@@ -152,8 +152,8 @@ Filenames are filesystem-safe on macOS, Linux, and Windows. Each log records the
 
 ## Troubleshooting
 
-- **`OCI configuration not found`** — run `oci setup config` first, then `bunx oci-vm`.
-- **`not retryable` errors** — check the reported reason and the latest file in `oci-vm-logs/`.
+- **`OCI configuration not found`** — run `oci setup config` first, then `bunx oci-free-vm`.
+- **`not retryable` errors** — check the reported reason and the latest file in `oci-free-vm-logs/`.
 - **Instance already exists** — the CLI detects existing instances by name and does nothing.
 - **Non-interactive environments** — use `--json`; every required value must come from CLI flags or the YAML file.
 

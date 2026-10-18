@@ -189,7 +189,7 @@ let fixture: { configPath: string; sshKeyPath: string } | undefined;
 
 async function getFixture(): Promise<{ configPath: string; sshKeyPath: string }> {
   if (fixture !== undefined) return fixture;
-  const dir = await mkdtemp(join(tmpdir(), 'oci-vm-test-'));
+  const dir = await mkdtemp(join(tmpdir(), 'oci-free-vm-test-'));
   const keyPath = join(dir, 'oci_key.pem');
   const exported = KEY_PAIR.privateKey.export({ type: 'pkcs8', format: 'pem' });
   if (typeof exported !== 'string') throw new Error('expected PEM string export');
@@ -209,7 +209,7 @@ async function getFixture(): Promise<{ configPath: string; sshKeyPath: string }>
     'utf8',
   );
   const sshKeyPath = join(dir, 'id_ed25519.pub');
-  await writeFile(sshKeyPath, 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestmq oci-vm-test\n', 'utf8');
+  await writeFile(sshKeyPath, 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestmq oci-free-vm-test\n', 'utf8');
   fixture = { configPath, sshKeyPath };
   return fixture;
 }
@@ -478,9 +478,9 @@ describe('resolveConfig', () => {
 
 describe('yaml config round trip', () => {
   it('saves sections and preserves unknown top-level keys', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'oci-vm-yaml-'));
+    const dir = await mkdtemp(join(tmpdir(), 'oci-free-vm-yaml-'));
     try {
-      const path = join(dir, 'oci-vm.yaml');
+      const path = join(dir, 'oci-free-vm.yaml');
       await saveYamlConfig(path, { custom_key: 'keep-me' }, {
         defaults: { region: 'us-ashburn-1', architecture: 'arm64' },
         state: { last_deployment: { status: 'succeeded', instance_id: 'ocid1.instance.oc1..1' } },
@@ -496,7 +496,7 @@ describe('yaml config round trip', () => {
     }
   });
   it('tolerates a missing file and rejects invalid YAML or structure', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'oci-vm-yaml-'));
+    const dir = await mkdtemp(join(tmpdir(), 'oci-free-vm-yaml-'));
     try {
       const missing = await loadYamlConfig(join(dir, 'absent.yaml'));
       assert.deepEqual(missing.data, {});
@@ -535,7 +535,7 @@ describe('Oci client against a local fake', () => {
 describe('deployWithRetry', () => {
   it('advances to the next AD after a capacity failure', async () => {
     const mock = await MockOci.start();
-    const dir = await mkdtemp(join(tmpdir(), 'oci-vm-engine-'));
+    const dir = await mkdtemp(join(tmpdir(), 'oci-free-vm-engine-'));
     try {
       mock.launchFailures.push({ status: 500, code: 'InternalError', message: 'Out of host capacity' });
       const lines: string[] = [];
@@ -588,7 +588,7 @@ describe('deployWithRetry', () => {
 
   it('waits between full AD cycles and persists the failure via callback', async () => {
     const mock = await MockOci.start();
-    const dir = await mkdtemp(join(tmpdir(), 'oci-vm-engine-'));
+    const dir = await mkdtemp(join(tmpdir(), 'oci-free-vm-engine-'));
     try {
       mock.launchFailures.push(
         { status: 500, code: 'InternalError', message: 'Out of host capacity' },
@@ -639,7 +639,7 @@ describe('deployWithRetry', () => {
 
   it('aborts immediately on non-retryable failures', async () => {
     const mock = await MockOci.start();
-    const dir = await mkdtemp(join(tmpdir(), 'oci-vm-engine-'));
+    const dir = await mkdtemp(join(tmpdir(), 'oci-free-vm-engine-'));
     try {
       mock.launchFailures.push({ status: 401, code: 'NotAuthenticated', message: 'bad signature' });
       const sleeps: number[] = [];
@@ -683,7 +683,7 @@ describe('deployWithRetry', () => {
 
   it('detects an existing instance before any launch attempt', async () => {
     const mock = await MockOci.start();
-    const dir = await mkdtemp(join(tmpdir(), 'oci-vm-engine-'));
+    const dir = await mkdtemp(join(tmpdir(), 'oci-free-vm-engine-'));
     try {
       mock.instances.push({ id: 'ocid1.instance.oc1..exists', displayName: 'devbox', lifecycleState: 'RUNNING' });
       const outcome = await deployWithRetry(
@@ -727,7 +727,7 @@ describe('run in --json mode against a local fake', () => {
   it('deploys after a capacity failure, persists state, and logs attempts', async () => {
     await withOciConfigEnv(async () => {
       const f = await getFixture();
-      const dir = await mkdtemp(join(tmpdir(), 'oci-vm-run-'));
+      const dir = await mkdtemp(join(tmpdir(), 'oci-free-vm-run-'));
       const mock = await MockOci.start();
       try {
         mock.bootVolumes = [
@@ -738,7 +738,7 @@ describe('run in --json mode against a local fake', () => {
         const code = await run(
           overrides({
             jsonMode: true,
-            configPath: join(dir, 'oci-vm.yaml'),
+            configPath: join(dir, 'oci-free-vm.yaml'),
             compartmentId: 'ocid1.compartment.oc1..sandbox',
             vcnId: 'ocid1.vcn.oc1..v1',
             subnetId: 'ocid1.subnet.oc1..s1',
@@ -757,7 +757,7 @@ describe('run in --json mode against a local fake', () => {
         assert.equal(mock.launchRequests.length, 2);
         assert.equal(JSON.stringify(mock.launchRequests[0]).includes('"bootVolumeSizeInGBs":250'), true);
         assert.equal(JSON.stringify(mock.launchRequests[0]).includes('"ocpus":1'), true);
-        const { data } = await loadYamlConfig(join(dir, 'oci-vm.yaml'));
+        const { data } = await loadYamlConfig(join(dir, 'oci-free-vm.yaml'));
         assert.equal(data.state?.last_deployment?.status, 'succeeded');
         assert.equal(data.state?.last_deployment?.instance_name, 'devbox');
         assert.equal(data.defaults?.instance?.disk_gbs, 250);
@@ -779,14 +779,14 @@ describe('run in --json mode against a local fake', () => {
   it('exits 0 without launching when the instance already exists', async () => {
     await withOciConfigEnv(async () => {
       const f = await getFixture();
-      const dir = await mkdtemp(join(tmpdir(), 'oci-vm-run-'));
+      const dir = await mkdtemp(join(tmpdir(), 'oci-free-vm-run-'));
       const mock = await MockOci.start();
       try {
         mock.instances.push({ id: 'ocid1.instance.oc1..exists', displayName: 'devbox', lifecycleState: 'RUNNING' });
         const code = await run(
           overrides({
             jsonMode: true,
-            configPath: join(dir, 'oci-vm.yaml'),
+            configPath: join(dir, 'oci-free-vm.yaml'),
             compartmentId: 'ocid1.compartment.oc1..sandbox',
             vcnId: 'ocid1.vcn.oc1..v1',
             subnetId: 'ocid1.subnet.oc1..s1',
@@ -821,7 +821,7 @@ describe('run in --json mode against a local fake', () => {
   it('exits 4 when the run is aborted before the first attempt', async () => {
     await withOciConfigEnv(async () => {
       const f = await getFixture();
-      const dir = await mkdtemp(join(tmpdir(), 'oci-vm-run-'));
+      const dir = await mkdtemp(join(tmpdir(), 'oci-free-vm-run-'));
       const mock = await MockOci.start();
       try {
         const controller = new AbortController();
@@ -829,7 +829,7 @@ describe('run in --json mode against a local fake', () => {
         const code = await run(
           overrides({
             jsonMode: true,
-            configPath: join(dir, 'oci-vm.yaml'),
+            configPath: join(dir, 'oci-free-vm.yaml'),
             compartmentId: 'ocid1.compartment.oc1..sandbox',
             vcnId: 'ocid1.vcn.oc1..v1',
             subnetId: 'ocid1.subnet.oc1..s1',
@@ -842,7 +842,7 @@ describe('run in --json mode against a local fake', () => {
         );
         assert.equal(code, 4);
         assert.equal(mock.launchRequests.length, 0);
-        const { data } = await loadYamlConfig(join(dir, 'oci-vm.yaml'));
+        const { data } = await loadYamlConfig(join(dir, 'oci-free-vm.yaml'));
         assert.equal(data.defaults?.instance?.name, 'devbox');
       } finally {
         await mock.close();

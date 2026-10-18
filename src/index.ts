@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // allow: SIZE_OK — PRD §27 mandates the entire MVP application in one file.
 //
-// oci-vm — deploy an OCI VM and automatically retry when capacity is unavailable.
+// oci-free-vm — deploy an OCI VM and automatically retry when capacity is unavailable.
 // Boring infrastructure, excellent CLI UX.
 
 import { createHash, createPrivateKey, createSign } from 'node:crypto';
@@ -19,10 +19,10 @@ import { z } from 'zod';
 
 // ------------------------------------------------------------------ constants
 
-const APP = { name: 'oci-vm', version: '0.1.0' } as const;
+const APP = { name: 'oci-free-vm', version: '0.1.0' } as const;
 
-const DEFAULT_CONFIG_FILE = 'oci-vm.yaml';
-const LOGS_DIR = 'oci-vm-logs';
+const DEFAULT_CONFIG_FILE = 'oci-free-vm.yaml';
+const LOGS_DIR = 'oci-free-vm-logs';
 
 const LIMITS = {
   storageWarnGb: 200,
@@ -35,7 +35,7 @@ const LIMITS = {
   defaultMemoryGbs: 6,
   defaultDiskGb: 100,
   defaultName: 'devbox',
-  defaultVcnName: 'oci-vm-vcn',
+  defaultVcnName: 'oci-free-vm-vcn',
   defaultVcnCidr: '10.0.0.0/16',
   defaultSubnetCidr: '10.0.0.0/24',
   requestTimeoutMs: 30_000,
@@ -412,10 +412,10 @@ function printUsage(): void {
       `${APP.name} v${APP.version} — deploy an OCI VM and automatically retry when capacity is unavailable.`,
       '',
       'Usage:',
-      '  oci-vm [options]',
+      '  oci-free-vm [options]',
       '',
       'Options:',
-      '  --config <path>           configuration file (default: ./oci-vm.yaml)',
+      '  --config <path>           configuration file (default: ./oci-free-vm.yaml)',
       '  --profile <name>          OCI config profile (default: DEFAULT)',
       '  --json                    machine-readable JSON output, non-interactive',
       '  --yes                     skip confirmation prompts',
@@ -673,7 +673,7 @@ export class Oci {
   ) {
     this.auth = auth;
     this.fetchFn = deps.fetchFn ?? fetch;
-    this.endpointOverride = deps.endpointOverride ?? process.env['OCI_VM_ENDPOINT'];
+    this.endpointOverride = deps.endpointOverride ?? process.env['OCI_FREE_VM_ENDPOINT'];
     this.now = deps.now ?? (() => new Date());
   }
 
@@ -1815,7 +1815,7 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
       io.message('Configure OCI first:\n');
       io.message('  oci setup config\n');
       io.message('\nThen run:\n');
-      io.message('  bunx oci-vm\n');
+      io.message('  bunx oci-free-vm\n');
     } else {
       io.error(failure.message);
       io.message(`${failureAdvice(failure.kind)}\n`);
@@ -1956,7 +1956,7 @@ async function main(): Promise<void> {
   }
   const io = cli.jsonMode ? jsonIo() : interactiveIo();
   if (io.interactive && process.stdout.isTTY !== true) {
-    process.stderr.write('✗ oci-vm needs an interactive terminal. Use --json for non-interactive use.\n');
+    process.stderr.write('✗ oci-free-vm needs an interactive terminal. Use --json for non-interactive use.\n');
     process.exit(EXIT.invalidConfig);
   }
   const controller = new AbortController();
