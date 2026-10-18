@@ -1,0 +1,29 @@
+# oci-vm configuration — copied to oci-vm.yaml next to wherever you run the CLI.
+# NOT a database: oci-vm persists your last-used configuration (defaults),
+# the last successful deployment (state), and the most recent error (last_error).
+# Manually pre-filled values become defaults; CLI arguments override them;
+# interactive prompts only ask for values that remain unresolved.
+# Never store secrets in this file.
+
+defaults:
+  region: us-ashburn-1
+  architecture: arm64
+  # compartment_id: ocid1.compartment.oc1...
+  network:
+    mode: existing # existing | create
+    # vcn_id: ocid1.vcn.oc1...
+    # subnet_id: ocid1.subnet.oc1...
+  instance:
+    name: devbox
+    shape: VM.Standard.A1.Flex
+    ocpus: 1
+    memory_gbs: 6
+    disk_gbs: 250
+    assign_public_ip: true
+  ssh:
+    public_key_file: ~/.ssh/id_ed25519.pub
+  retry:
+    interval_seconds: 900
+
+state: {}
+last_error: {}

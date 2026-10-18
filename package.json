@@ -1,0 +1,48 @@
+{
+  "name": "oci-vm",
+  "version": "0.1.0",
+  "description": "Deploy an OCI VM and automatically retry when capacity is unavailable.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yokharian/oracle-free-tier-retrier.git"
+  },
+  "bin": {
+    "oci-vm": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/index.js",
+    "test": "node --test src/",
+    "prepublishOnly": "npm run typecheck && npm run build && npm test"
+  },
+  "keywords": [
+    "oci",
+    "oracle",
+    "oracle-cloud",
+    "vm",
+    "cli",
+    "deploy",
+    "retry",
+    "capacity",
+    "free-tier"
+  ],
+  "dependencies": {
+    "@clack/prompts": "^1.8.1",
+    "picocolors": "^1.1.1",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}

@@ -1,0 +1,6 @@
+node_modules/
+dist/
+oci-vm.yaml
+oci-vm-logs/
+.DS_Store
+.idea/
