@@ -1,617 +1,25 @@
 #!/usr/bin/env node
-// allow: SIZE_OK — PRD §27 mandates the entire MVP application in one file.
-//
 // oci-free-vm — deploy an OCI VM and automatically retry when capacity is unavailable.
-// Boring infrastructure, excellent CLI UX.
+// Entry point and domain logic; shared types live in types.ts, pure helpers in utils.ts.
 
-import { createPrivateKey } from 'node:crypto';
-import type { KeyObject } from 'node:crypto';
-import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { spawnSync } from 'node:child_process';
-import { readFileSync, realpathSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { join, resolve } from 'node:path';
 import process from 'node:process';
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
-import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { z } from 'zod';
 import * as ociCommon from 'oci-common';
 import * as ociCore from 'oci-core';
 import * as ociIdentity from 'oci-identity';
+import { APP, DEFAULT_CONFIG_FILE, LOGS_DIR, LIMITS, EXIT, APP_DEFAULTS } from './types.ts';
+import type { Architecture, BootVolume, CliOverrides, Compartment, DeploymentPlan, Failure, Image, Instance, IO, LaunchInstanceDetails, LastErrorOut, NetworkMode, OciAuth, ResolvedConfig, RouteTable, SecurityList, SelectOption, StorageReport, Subnet, Vcn, YamlConfig } from './types.ts';
+import {
+  CancelledError, ConfigError, NetworkError, OciConfigError, OciHttpError, appVersion, assertNever, attemptLogFileName, buildAttemptLog, buildLaunchBody, classifyFailure, detectSshPublicKeyFile, expandTilde, failureAdvice, isFlexShape, loadOciAuth, loadYamlConfig, parseCliArgs, pickUbuntuImage, probeBinary, projectStorage, readSshPublicKey, resolveConfig, sanitize, saveYamlConfig, shortAd, stripNulls, validateDisk, validateFlexResources,
+} from './utils.ts';
 
-// ------------------------------------------------------------------ constants
-
-const APP = { name: 'oci-free-vm' } as const;
-
-let cachedAppVersion: string | undefined;
-
-export function appVersion(): string {
-  if (cachedAppVersion === undefined) {
-    const parsed: unknown = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    if (parsed === null || typeof parsed !== 'object' || !('version' in parsed) || typeof parsed.version !== 'string') {
-      throw new Error('package.json has no valid version');
-    }
-    cachedAppVersion = parsed.version;
-  }
-  return cachedAppVersion;
-}
-
-const DEFAULT_CONFIG_FILE = 'oci-free-vm.yaml';
-const LOGS_DIR = 'oci-free-vm-logs';
-
-const LIMITS = {
-  storageWarnGb: 200,
-  diskMinGb: 50,
-  diskMaxGb: 32_768,
-  ocpusMax: 64,
-  memoryMaxGbs: 1024,
-  defaultIntervalSeconds: 900,
-  defaultOcpus: 1,
-  defaultMemoryGbs: 6,
-  defaultDiskGb: 100,
-  defaultName: 'devbox',
-  defaultVcnName: 'oci-free-vm-vcn',
-  defaultVcnCidr: '10.0.0.0/16',
-  defaultSubnetCidr: '10.0.0.0/24',
-} as const;
-
-const EXIT = {
-  success: 0,
-  deployFailed: 1,
-  invalidConfig: 2,
-  auth: 3,
-  cancelled: 4,
-  unexpected: 5,
-} as const;
-
-type Architecture = 'arm64' | 'x86_64';
-type NetworkMode = 'existing' | 'create';
-type FailureKind = 'capacity' | 'transient' | 'auth' | 'invalid' | 'fatal';
-type FailureCode = 'OUT_OF_CAPACITY' | 'TRANSIENT' | 'AUTH' | 'CONFIG' | 'DEPLOY' | 'UNEXPECTED';
-
-function assertNever(value: never): never {
-  throw new Error(`unhandled variant: ${JSON.stringify(value)}`);
-}
-
-// ---------------------------------------------------------------------- errors
-
-export class ConfigError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'ConfigError';
-  }
-}
-
-export class OciConfigError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'OciConfigError';
-  }
-}
-
-export class CancelledError extends Error {
-  constructor() {
-    super('cancelled');
-    this.name = 'CancelledError';
-  }
-}
-
-export class OciHttpError extends Error {
-  readonly status: number;
-  readonly code: string | undefined;
-  readonly operation: string;
-  constructor(operation: string, status: number, code: string | undefined, message: string) {
-    super(message);
-    this.name = 'OciHttpError';
-    this.operation = operation;
-    this.status = status;
-    this.code = code;
-  }
-}
-
-export class NetworkError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'NetworkError';
-  }
-}
-
-export interface Failure {
-  readonly kind: FailureKind;
-  readonly retryable: boolean;
-  readonly exitCode: number;
-  readonly code: FailureCode;
-  readonly message: string;
-}
-
-export function classifyFailure(error: unknown): Failure {
-  if (error instanceof OciConfigError) {
-    return { kind: 'auth', retryable: false, exitCode: EXIT.auth, code: 'AUTH', message: error.message };
-  }
-  if (error instanceof ConfigError) {
-    return { kind: 'invalid', retryable: false, exitCode: EXIT.invalidConfig, code: 'CONFIG', message: error.message };
-  }
-  if (error instanceof NetworkError) {
-    return { kind: 'transient', retryable: true, exitCode: EXIT.deployFailed, code: 'TRANSIENT', message: error.message };
-  }
-  if (error instanceof OciHttpError) {
-    if (error.code === 'NotAuthorizedOrNotFound') {
-      return { kind: 'auth', retryable: false, exitCode: EXIT.auth, code: 'AUTH', message: `${error.operation}: ${error.message}` };
-    }
-    const text = `${error.code ?? ''} ${error.message}`.toLowerCase();
-    const failure: Omit<Failure, 'message'> = /out of (host )?capacity/.test(text)
-      ? { kind: 'capacity', retryable: true, exitCode: EXIT.deployFailed, code: 'OUT_OF_CAPACITY' }
-      : error.status === 429 || error.status >= 500
-        ? { kind: 'transient', retryable: true, exitCode: EXIT.deployFailed, code: 'TRANSIENT' }
-        : error.status === 401 || error.status === 403
-          ? { kind: 'auth', retryable: false, exitCode: EXIT.auth, code: 'AUTH' }
-          : error.status === 400
-            ? { kind: 'invalid', retryable: false, exitCode: EXIT.invalidConfig, code: 'CONFIG' }
-            : { kind: 'fatal', retryable: false, exitCode: EXIT.deployFailed, code: 'DEPLOY' };
-    return { ...failure, message: `${error.operation}: ${error.message}` };
-  }
-  return {
-    kind: 'fatal',
-    retryable: false,
-    exitCode: EXIT.unexpected,
-    code: 'UNEXPECTED',
-    message: error instanceof Error ? error.message : String(error),
-  };
-}
-
-function failureAdvice(kind: FailureKind): string {
-  switch (kind) {
-    case 'capacity':
-      return 'Capacity failures are retried automatically across Availability Domains.';
-    case 'transient':
-      return 'Transient OCI or network failures are retried automatically.';
-    case 'auth':
-      return 'Your OCI login is valid, but the user lacks permission for this operation in the selected compartment, or the OCID is wrong. Check the IAM policy, or select a different compartment.';
-    case 'invalid':
-      return 'Fix the reported configuration value and run again.';
-    case 'fatal':
-      return 'This error is not retryable.';
-    default:
-      return assertNever(kind);
-  }
-}
-
-// ------------------------------------------------------------ secret sanitizing
-
-export function stripNulls(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map((item) => stripNulls(item));
-  if (value !== null && typeof value === 'object') {
-    const kept: Record<string, unknown> = {};
-    for (const [key, entry] of Object.entries(value)) {
-      if (entry !== null) kept[key] = stripNulls(entry);
-    }
-    return kept;
-  }
-  return value;
-}
-
-/** Removes PEM blocks and OCI request-signature material from text bound for logs. */
-export function sanitize(text: string): string {
-  return text
-    .replace(/-----BEGIN[ A-Z0-9]*-----[\s\S]*?-----END[ A-Z0-9]*-----/g, '[redacted key material]')
-    .replace(/signature="[^"]+"/g, 'signature="[redacted]"')
-    .replace(/pass[_-]?phrase\s*=\s*\S+/gi, 'pass_phrase=[redacted]');
-}
-
-// ------------------------------------------------------------------ yaml config
-
-const networkDefaultsSchema = z.object({
-  mode: z.enum(['existing', 'create']).optional(),
-  vcn_id: z.string().optional(),
-  subnet_id: z.string().optional(),
-});
-
-const defaultsSchema = z.object({
-  region: z.string().optional(),
-  architecture: z.enum(['arm64', 'x86_64']).optional(),
-  compartment_id: z.string().optional(),
-  network: networkDefaultsSchema.optional(),
-  instance: z
-    .object({
-      name: z.string().optional(),
-      shape: z.string().optional(),
-      ocpus: z.number().optional(),
-      memory_gbs: z.number().optional(),
-      disk_gbs: z.number().optional(),
-      assign_public_ip: z.boolean().optional(),
-    })
-    .optional(),
-  ssh: z.object({ public_key_file: z.string().optional() }).optional(),
-  retry: z.object({ interval_seconds: z.number().optional() }).optional(),
-});
-
-const lastDeploymentSchema = z
-  .object({
-    status: z.string().optional(),
-    timestamp: z.string().optional(),
-    instance_id: z.string().optional(),
-    instance_name: z.string().optional(),
-    availability_domain: z.string().optional(),
-    architecture: z.enum(['arm64', 'x86_64']).optional(),
-    shape: z.string().optional(),
-    disk_gbs: z.number().optional(),
-  })
-  .optional();
-
-const lastErrorSchema = z
-  .object({
-    timestamp: z.string().optional(),
-    code: z.string().optional(),
-    message: z.string().optional(),
-  })
-  .optional();
-
-const yamlConfigSchema = z
-  .object({
-    defaults: defaultsSchema.optional(),
-    state: z.object({ last_deployment: lastDeploymentSchema }).optional(),
-    last_error: lastErrorSchema,
-  })
-  .passthrough();
-
-export type YamlConfig = z.infer<typeof yamlConfigSchema>;
-export type YamlDefaults = NonNullable<YamlConfig['defaults']>;
-export type LastErrorOut = NonNullable<z.infer<typeof lastErrorSchema>>;
-
-export async function loadYamlConfig(path: string): Promise<{ data: YamlConfig; raw: Record<string, unknown> }> {
-  let text: string;
-  try {
-    text = await readFile(path, 'utf8');
-  } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
-      return { data: {}, raw: {} };
-    }
-    throw error;
-  }
-  let parsed: unknown;
-  try {
-    parsed = parseYaml(text);
-  } catch (error) {
-    throw new ConfigError(`${path}: invalid YAML (${error instanceof Error ? error.message : String(error)})`);
-  }
-  if (parsed === null || parsed === undefined) return { data: {}, raw: {} };
-  const result = yamlConfigSchema.safeParse(parsed);
-  if (!result.success) {
-    const issue = result.error.issues[0];
-    const where = issue === undefined ? '' : ` (${issue.path.join('.')}: ${issue.message})`;
-    throw new ConfigError(`${path}: invalid configuration${where}`);
-  }
-  return { data: result.data, raw: result.data };
-}
-
-export async function saveYamlConfig(
-  path: string,
-  raw: Record<string, unknown>,
-  sections: {
-    defaults: Record<string, unknown>;
-    state: Record<string, unknown>;
-    last_error: Record<string, unknown>;
-  },
-): Promise<void> {
-  const merged: Record<string, unknown> = { ...raw, ...sections };
-  await writeFile(path, stringifyYaml(merged), 'utf8');
-}
-
-// ------------------------------------------------------------------ CLI parsing
-
-export interface CliOverrides {
-  readonly configPath?: string | undefined;
-  readonly profile?: string | undefined;
-  readonly jsonMode: boolean;
-  readonly yes: boolean;
-  readonly help: boolean;
-  readonly version: boolean;
-  readonly region?: string | undefined;
-  readonly compartmentId?: string | undefined;
-  readonly architecture?: Architecture | undefined;
-  readonly networkMode?: NetworkMode | undefined;
-  readonly vcnId?: string | undefined;
-  readonly subnetId?: string | undefined;
-  readonly shape?: string | undefined;
-  readonly ocpus?: number | undefined;
-  readonly memoryGbs?: number | undefined;
-  readonly diskGbs?: number | undefined;
-  readonly instanceName?: string | undefined;
-  readonly sshKeyFile?: string | undefined;
-  readonly assignPublicIp?: boolean | undefined;
-  readonly intervalSeconds?: number | undefined;
-}
-
-function toPositiveInt(name: string, raw: string | undefined): number | undefined {
-  if (raw === undefined) return undefined;
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new ConfigError(`--${name} must be a positive integer (got "${raw}")`);
-  }
-  return value;
-}
-
-function toPositiveNumber(name: string, raw: string | undefined): number | undefined {
-  if (raw === undefined) return undefined;
-  const value = Number(raw);
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new ConfigError(`--${name} must be a positive number (got "${raw}")`);
-  }
-  return value;
-}
-
-const BOOLEAN_FLAGS = new Set(['help', 'json', 'version', 'yes']);
-const VALUE_FLAGS = new Set([
-  'config',
-  'profile',
-  'region',
-  'compartment-id',
-  'arch',
-  'shape',
-  'ocpus',
-  'memory',
-  'disk',
-  'name',
-  'ssh-key',
-  'public-ip',
-  'interval-seconds',
-  'network-mode',
-  'vcn-id',
-  'subnet-id',
-]);
-
-export function parseCliArgs(argv: readonly string[]): CliOverrides {
-  const values = new Map<string, string | boolean>();
-  let index = 0;
-  while (index < argv.length) {
-    const arg = argv[index];
-    if (arg === undefined) break;
-    if (arg === '--') throw new ConfigError('positional arguments are not supported');
-    if (!arg.startsWith('--')) throw new ConfigError(`unexpected argument "${arg}"`);
-    const eq = arg.indexOf('=');
-    const name = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
-    if (name === '') throw new ConfigError(`unexpected argument "${arg}"`);
-    if (!BOOLEAN_FLAGS.has(name) && !VALUE_FLAGS.has(name)) throw new ConfigError(`unknown option --${name}`);
-    if (BOOLEAN_FLAGS.has(name)) {
-      if (eq !== -1) {
-        const explicit = arg.slice(eq + 1);
-        if (explicit !== 'true' && explicit !== 'false') throw new ConfigError(`--${name} must be "true" or "false"`);
-        values.set(name, explicit === 'true');
-      } else {
-        values.set(name, true);
-      }
-    } else if (eq !== -1) {
-      values.set(name, arg.slice(eq + 1));
-    } else {
-      const next = argv[index + 1];
-      if (next === undefined || next.startsWith('--')) throw new ConfigError(`--${name} requires a value`);
-      values.set(name, next);
-      index += 1;
-    }
-    index += 1;
-  }
-  const str = (name: string): string | undefined => {
-    const value = values.get(name);
-    return typeof value === 'string' ? value : undefined;
-  };
-  const nonEmpty = (name: string): string | undefined => {
-    const value = str(name);
-    return value === '' ? undefined : value;
-  };
-  const archValue = str('arch');
-  let architecture: Architecture | undefined;
-  if (archValue === 'arm64' || archValue === 'x86_64') architecture = archValue;
-  else if (archValue !== undefined) throw new ConfigError(`--arch must be "arm64" or "x86_64" (got "${archValue}")`);
-  const publicIpValue = str('public-ip');
-  let assignPublicIp: boolean | undefined;
-  if (publicIpValue === 'true') assignPublicIp = true;
-  else if (publicIpValue === 'false') assignPublicIp = false;
-  else if (publicIpValue !== undefined) throw new ConfigError(`--public-ip must be "true" or "false" (got "${publicIpValue}")`);
-  const networkModeValue = str('network-mode');
-  let networkMode: NetworkMode | undefined;
-  if (networkModeValue === 'existing' || networkModeValue === 'create') networkMode = networkModeValue;
-  else if (networkModeValue !== undefined) throw new ConfigError(`--network-mode must be "existing" or "create" (got "${networkModeValue}")`);
-  return {
-    configPath: nonEmpty('config'),
-    profile: nonEmpty('profile'),
-    jsonMode: values.get('json') === true,
-    yes: values.get('yes') === true,
-    help: values.get('help') === true,
-    version: values.get('version') === true,
-    region: nonEmpty('region'),
-    compartmentId: nonEmpty('compartment-id'),
-    architecture,
-    networkMode,
-    vcnId: nonEmpty('vcn-id'),
-    subnetId: nonEmpty('subnet-id'),
-    shape: nonEmpty('shape'),
-    ocpus: toPositiveInt('ocpus', str('ocpus')),
-    memoryGbs: toPositiveNumber('memory', str('memory')),
-    diskGbs: toPositiveInt('disk', str('disk')),
-    instanceName: nonEmpty('name'),
-    sshKeyFile: nonEmpty('ssh-key'),
-    assignPublicIp,
-    intervalSeconds: toPositiveInt('interval-seconds', str('interval-seconds')),
-  };
-}
-
-function printUsage(): void {
-  process.stdout.write(
-    [
-      `${APP.name} v${appVersion()} — deploy an OCI VM and automatically retry when capacity is unavailable.`,
-      '',
-      'Usage:',
-      '  oci-free-vm [options]',
-      '',
-      'Options:',
-      '  --config <path>           configuration file (default: ./oci-free-vm.yaml)',
-      '  --profile <name>          OCI config profile (default: DEFAULT)',
-      '  --json                    machine-readable JSON output, non-interactive',
-      '  --yes                     skip confirmation prompts',
-      '  --name <name>             instance name',
-      '  --region <region>         OCI region (default: from ~/.oci/config)',
-      '  --compartment-id <ocid>   compartment OCID',
-      '  --arch <arch>             arm64 | x86_64',
-      '  --shape <shape>           instance shape (e.g. VM.Standard.A1.Flex)',
-      '  --ocpus <n>               OCPUs (flexible shapes)',
-      '  --memory <gb>             memory in GB (flexible shapes)',
-      '  --disk <gb>               boot volume size in GB',
-      '  --ssh-key <path>          SSH public key file (default: ~/.ssh/id_ed25519.pub)',
-      '  --public-ip <bool>         "true" or "false"',
-      '  --interval-seconds <n>    retry interval between full AD cycles (default: 900)',
-      '  --network-mode <mode>     existing | create',
-      '  --vcn-id <ocid>           existing VCN OCID',
-      '  --subnet-id <ocid>        existing subnet OCID',
-      '  --version                 print version',
-      '  --help                    print this help',
-      '',
-      'Precedence: CLI arguments > YAML defaults > interactive prompts > application defaults.',
-      '',
-    ].join('\n'),
-  );
-}
-
-// ---------------------------------------------------------------- oci ~/.oci/config
-
-export function parseOciConfigText(text: string): Map<string, Record<string, string>> {
-  const sections = new Map<string, Record<string, string>>();
-  let current = 'DEFAULT';
-  for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (line === '' || line.startsWith('#')) continue;
-    const section = /^\[(.+)\]$/.exec(line);
-    if (section !== null) {
-      current = section[1] ?? 'DEFAULT';
-      continue;
-    }
-    const eq = line.indexOf('=');
-    if (eq === -1) continue;
-    const record = sections.get(current) ?? {};
-    record[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
-    sections.set(current, record);
-  }
-  return sections;
-}
-
-export function expandTilde(path: string): string {
-  if (path === '~') return homedir();
-  if (path.startsWith('~/')) return join(homedir(), path.slice(2));
-  return path;
-}
-
-export interface OciAuth {
-  readonly user: string;
-  readonly tenancy: string;
-  readonly fingerprint: string;
-  readonly region: string;
-  readonly keyFile: string;
-  readonly privateKey: KeyObject;
-  readonly privateKeyPem: string;
-  readonly passphrase?: string | undefined;
-}
-
-export async function loadOciAuth(profileName: string | undefined): Promise<OciAuth> {
-  const configPath = process.env['OCI_CONFIG_FILE'] ?? join(homedir(), '.oci', 'config');
-  let text: string;
-  try {
-    text = await readFile(configPath, 'utf8');
-  } catch {
-    throw new OciConfigError(`OCI configuration not found at ${configPath}`);
-  }
-  const sections = parseOciConfigText(text);
-  const profile = profileName ?? process.env['OCI_CONFIG_PROFILE'] ?? 'DEFAULT';
-  const section = sections.get(profile) ?? sections.get('DEFAULT');
-  if (section === undefined) {
-    throw new OciConfigError(`profile "${profile}" not found in ${configPath}`);
-  }
-  const required = ['user', 'tenancy', 'fingerprint', 'region', 'key_file'] as const;
-  for (const key of required) {
-    if (section[key] === undefined || section[key] === '') {
-      throw new OciConfigError(`profile "${profile}" in ${configPath} is missing "${key}"`);
-    }
-  }
-  const keyFile = expandTilde(section['key_file'] ?? '');
-  let pem: string;
-  try {
-    pem = await readFile(keyFile, 'utf8');
-  } catch {
-    throw new OciConfigError(`private key file "${keyFile}" (key_file in ${configPath}) is not readable`);
-  }
-  let privateKey: KeyObject;
-  try {
-    privateKey = createPrivateKey(pem);
-  } catch {
-    throw new OciConfigError(`private key file "${keyFile}" is not a valid PEM RSA key`);
-  }
-  return {
-    user: section['user'] ?? '',
-    tenancy: section['tenancy'] ?? '',
-    fingerprint: section['fingerprint'] ?? '',
-    region: section['region'] ?? '',
-    keyFile,
-    privateKey,
-    privateKeyPem: pem,
-    ...(section['pass_phrase'] === undefined || section['pass_phrase'] === '' ? {} : { passphrase: section['pass_phrase'] }),
-  };
-}
-
-export function probeBinary(name: string): boolean {
-  const result = spawnSync(name, ['--version'], { stdio: 'ignore' });
-  return result.error === undefined;
-}
-
-// ------------------------------------------------------------ official SDK types
-
-export interface Compartment {
-  readonly id: string;
-  readonly name: string;
-  readonly lifecycleState: string;
-}
-
-export interface Vcn {
-  readonly id: string;
-  readonly displayName: string | null;
-  readonly defaultRouteTableId?: string | null | undefined;
-  readonly defaultSecurityListId?: string | null | undefined;
-}
-
-export interface Subnet {
-  readonly id: string;
-  readonly displayName: string | null;
-  readonly vcnId: string;
-  readonly availabilityDomain?: string | null | undefined;
-}
-
-export interface Image {
-  readonly id: string;
-  readonly operatingSystem: string;
-  readonly operatingSystemVersion: string;
-  readonly timeCreated?: string | null | undefined;
-}
-
-export interface Instance {
-  readonly id: string;
-  readonly displayName: string | null;
-  readonly lifecycleState: string;
-}
-
-export interface BootVolume {
-  readonly displayName: string | null;
-  readonly sizeInGBs: number | null;
-}
-
-export interface RouteTable {
-  readonly id: string;
-  readonly routeRules?: readonly unknown[] | null | undefined;
-}
-
-export interface SecurityList {
-  readonly id: string;
-  readonly ingressSecurityRules: readonly ociCore.models.IngressSecurityRule[];
-  readonly egressSecurityRules: readonly ociCore.models.EgressSecurityRule[];
-}
+export * from './types.ts';
+export * from './utils.ts';
 
 function cleanIngressRule(rule: ociCore.models.IngressSecurityRule): ociCore.models.IngressSecurityRule {
   const serialized = ociCommon.ObjectSerializer.serialize(rule, 'IngressSecurityRule');
@@ -625,54 +33,6 @@ function cleanEgressRule(rule: ociCore.models.EgressSecurityRule): ociCore.model
   return JSON.parse(JSON.stringify(stripNulls(parsed)));
 }
 
-export interface LaunchInstanceDetails {
-  readonly availabilityDomain: string;
-  readonly compartmentId: string;
-  readonly displayName: string;
-  readonly shape: string;
-  readonly shapeConfig?: { readonly ocpus: number; readonly memoryInGBs: number };
-  readonly sourceDetails: { readonly sourceType: 'image'; readonly imageId: string; readonly bootVolumeSizeInGBs: number };
-  readonly createVnicDetails: { readonly subnetId: string; readonly assignPublicIp: boolean };
-  readonly metadata: { readonly ssh_authorized_keys: string };
-}
-
-export function buildLaunchBody(args: {
-  availabilityDomain: string;
-  compartmentId: string;
-  displayName: string;
-  shape: string;
-  shapeIsFlex: boolean;
-  ocpus: number | null;
-  memoryGbs: number | null;
-  diskGbs: number;
-  subnetId: string;
-  assignPublicIp: boolean;
-  imageId: string;
-  sshPublicKey: string;
-}): LaunchInstanceDetails {
-  const body: {
-    availabilityDomain: string;
-    compartmentId: string;
-    displayName: string;
-    shape: string;
-    shapeConfig?: { ocpus: number; memoryInGBs: number };
-    sourceDetails: { sourceType: 'image'; imageId: string; bootVolumeSizeInGBs: number };
-    createVnicDetails: { subnetId: string; assignPublicIp: boolean };
-    metadata: { ssh_authorized_keys: string };
-  } = {
-    availabilityDomain: args.availabilityDomain,
-    compartmentId: args.compartmentId,
-    displayName: args.displayName,
-    shape: args.shape,
-    ...(args.shapeIsFlex && args.ocpus !== null && args.memoryGbs !== null
-      ? { shapeConfig: { ocpus: args.ocpus, memoryInGBs: args.memoryGbs } }
-      : {}),
-    sourceDetails: { sourceType: 'image', imageId: args.imageId, bootVolumeSizeInGBs: args.diskGbs },
-    createVnicDetails: { subnetId: args.subnetId, assignPublicIp: args.assignPublicIp },
-    metadata: { ssh_authorized_keys: args.sshPublicKey },
-  };
-  return body;
-}
 
 export class Oci {
   private readonly auth: OciAuth;
@@ -954,26 +314,6 @@ export class Oci {
   }
 }
 
-// --------------------------------------------------------------------- storage
-
-export interface StorageReport {
-  readonly existingGb: number | null;
-  readonly items: readonly { readonly name: string; readonly gb: number }[];
-  readonly newGb: number;
-  readonly projectedGb: number | null;
-  readonly exceedsWarn: boolean;
-}
-
-export function projectStorage(existingGb: number | null, items: readonly { name: string; gb: number }[], newGb: number): StorageReport {
-  const projectedGb = existingGb === null ? null : existingGb + newGb;
-  return {
-    existingGb,
-    items,
-    newGb,
-    projectedGb,
-    exceedsWarn: projectedGb === null ? false : projectedGb > LIMITS.storageWarnGb,
-  };
-}
 
 async function computeExistingStorage(
   oci: Oci,
@@ -994,54 +334,6 @@ async function computeExistingStorage(
   }
 }
 
-// ------------------------------------------------------------------- log files
-
-export function shortAd(ad: string): string {
-  const match = /AD-(\d+)\b/.exec(ad);
-  return match === null ? ad.replace(/[^A-Za-z0-9-]/g, '-').slice(-30) : `AD-${match[1] ?? ''}`;
-}
-
-/** Windows-safe attempt log filename (§20): YYYY-MM-DDTHH-mm-ss-SSSZ-attempt-NNN-<ad>.log */
-export function attemptLogFileName(isoTimestamp: string, attempt: number, availabilityDomain: string): string {
-  const ts = isoTimestamp.replace(/[:.]/g, '-');
-  const ad = shortAd(availabilityDomain).replace(/[^A-Za-z0-9-]/g, '-');
-  return `${ts}-attempt-${String(attempt).padStart(3, '0')}-${ad}.log`;
-}
-
-export function buildAttemptLog(args: {
-  timestamp: string;
-  attempt: number;
-  availabilityDomain: string;
-  instance: string;
-  architecture: string;
-  shape: string;
-  ocpus: number | null;
-  memory: number | null;
-  disk: number;
-  operation: 'LaunchInstance';
-  result: 'SUCCEEDED' | 'FAILED';
-  errorCode?: string;
-  error?: string;
-}): string {
-  const lines = [
-    `Timestamp: ${args.timestamp}`,
-    `Attempt: ${args.attempt}`,
-    `Availability Domain: ${args.availabilityDomain}`,
-    `Instance: ${args.instance}`,
-    `Architecture: ${args.architecture}`,
-    `Shape: ${args.shape}`,
-    `OCPUs: ${args.ocpus ?? 'n/a'}`,
-    `Memory: ${args.memory === null ? 'n/a' : `${args.memory} GB`}`,
-    `Disk: ${args.disk} GB`,
-    '',
-    `Operation: ${args.operation}`,
-    '',
-    `Result: ${args.result}`,
-  ];
-  if (args.errorCode !== undefined) lines.push(`Error code: ${sanitize(args.errorCode)}`);
-  if (args.error !== undefined) lines.push(`Error: ${sanitize(args.error)}`);
-  return lines.join('\n') + '\n';
-}
 
 async function writeAttemptLog(dir: string, fileName: string, content: string): Promise<string> {
   await mkdir(dir, { recursive: true });
@@ -1050,27 +342,6 @@ async function writeAttemptLog(dir: string, fileName: string, content: string): 
   return path;
 }
 
-// -------------------------------------------------------------------------- IO
-
-export interface SelectOption {
-  readonly value: string;
-  readonly label: string;
-  readonly hint?: string;
-}
-
-export interface IO {
-  readonly interactive: boolean;
-  intro(title: string): void;
-  outro(message?: string): void;
-  message(text: string): void;
-  step(text: string): void;
-  success(text: string): void;
-  warn(text: string): void;
-  error(text: string): void;
-  select(message: string, options: readonly SelectOption[], initial?: string | undefined): Promise<string>;
-  text(message: string, opts?: { initial?: string | undefined; validate?: ((value: string) => string | undefined) | undefined }): Promise<string>;
-  confirm(message: string, initial: boolean): Promise<boolean>;
-}
 
 export function interactiveIo(): IO {
   return {
@@ -1135,62 +406,6 @@ function writeJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
-// ------------------------------------------------------------------- resolution
-
-export interface ResolvedConfig {
-  readonly region: string | null;
-  readonly compartmentId: string | null;
-  readonly architecture: Architecture | null;
-  readonly networkMode: NetworkMode | null;
-  readonly vcnId: string | null;
-  readonly subnetId: string | null;
-  readonly shape: string | null;
-  readonly ocpus: number | null;
-  readonly memoryGbs: number | null;
-  readonly diskGbs: number | null;
-  readonly instanceName: string | null;
-  readonly sshKeyFile: string | null;
-  readonly assignPublicIp: boolean | null;
-  readonly intervalSeconds: number | null;
-}
-
-export function resolveConfig(yaml: YamlDefaults | undefined, cli: CliOverrides): ResolvedConfig {
-  return {
-    region: cli.region ?? yaml?.region ?? null,
-    compartmentId: cli.compartmentId ?? yaml?.compartment_id ?? null,
-    architecture: cli.architecture ?? yaml?.architecture ?? null,
-    networkMode: cli.networkMode ?? yaml?.network?.mode ?? null,
-    vcnId: cli.vcnId ?? yaml?.network?.vcn_id ?? null,
-    subnetId: cli.subnetId ?? yaml?.network?.subnet_id ?? null,
-    shape: cli.shape ?? yaml?.instance?.shape ?? null,
-    ocpus: cli.ocpus ?? yaml?.instance?.ocpus ?? null,
-    memoryGbs: cli.memoryGbs ?? yaml?.instance?.memory_gbs ?? null,
-    diskGbs: cli.diskGbs ?? yaml?.instance?.disk_gbs ?? null,
-    instanceName: cli.instanceName ?? yaml?.instance?.name ?? null,
-    sshKeyFile: cli.sshKeyFile ?? yaml?.ssh?.public_key_file ?? null,
-    assignPublicIp: cli.assignPublicIp ?? yaml?.instance?.assign_public_ip ?? null,
-    intervalSeconds: cli.intervalSeconds ?? yaml?.retry?.interval_seconds ?? null,
-  };
-}
-
-const APP_DEFAULTS = {
-  architecture: 'arm64',
-  shape: { arm64: 'VM.Standard.A1.Flex', x86_64: 'VM.Standard.E2.1.Micro' },
-  diskGbs: LIMITS.defaultDiskGb,
-  ocpus: LIMITS.defaultOcpus,
-  memoryGbs: LIMITS.defaultMemoryGbs,
-  instanceName: LIMITS.defaultName,
-  assignPublicIp: true,
-  intervalSeconds: LIMITS.defaultIntervalSeconds,
-  networkMode: 'existing',
-  vcnName: LIMITS.defaultVcnName,
-  vcnCidr: LIMITS.defaultVcnCidr,
-  subnetCidr: LIMITS.defaultSubnetCidr,
-} as const;
-
-export function isFlexShape(shape: string): boolean {
-  return shape.includes('Flex');
-}
 
 function architectureForShape(shape: string): Architecture {
   return shape.startsWith('VM.Standard.A1') ? 'arm64' : 'x86_64';
@@ -1200,90 +415,6 @@ function shapesForArchitecture(shapes: readonly string[], architecture: Architec
   return shapes.filter((shape) => architectureForShape(shape) === architecture);
 }
 
-async function readFileOrNull(path: string): Promise<string | null> {
-  try {
-    return await readFile(path, 'utf8');
-  } catch {
-    return null; // no-excuse-ok: catch — existence probe
-  }
-}
-
-export async function detectSshPublicKeyFile(): Promise<string | null> {
-  for (const candidate of ['~/.ssh/id_ed25519.pub', '~/.ssh/id_rsa.pub']) {
-    if ((await readFileOrNull(expandTilde(candidate))) !== null) return candidate;
-  }
-  return null;
-}
-
-async function readSshPublicKey(file: string): Promise<string> {
-  const expanded = expandTilde(file);
-  let content: string;
-  try {
-    content = await readFile(expanded, 'utf8');
-  } catch {
-    throw new ConfigError(`cannot read SSH public key file: ${expanded}`);
-  }
-  const trimmed = content.trim();
-  if (!trimmed.startsWith('ssh-') && !trimmed.startsWith('ecdsa-')) {
-    throw new ConfigError(`${expanded} does not look like an SSH public key file`);
-  }
-  return trimmed;
-}
-
-function pickUbuntuImage(images: readonly Image[]): Image {
-  const ubuntu = images.filter((image) => image.operatingSystem === 'Canonical Ubuntu');
-  const best = [...ubuntu].sort((a, b) => {
-    const versionA = Number.parseFloat(a.operatingSystemVersion);
-    const versionB = Number.parseFloat(b.operatingSystemVersion);
-    if (versionA !== versionB) return versionB - versionA;
-    return (b.timeCreated ?? '').localeCompare(a.timeCreated ?? '');
-  });
-  const chosen = best[0];
-  if (chosen === undefined) {
-    throw new ConfigError('no Canonical Ubuntu image is available for the selected shape');
-  }
-  return chosen;
-}
-
-// ------------------------------------------------------------------- deployment plan
-
-export interface DeploymentPlan {
-  readonly region: string;
-  readonly compartmentId: string;
-  readonly compartmentName: string | null;
-  readonly networkMode: NetworkMode;
-  readonly vcnId: string | null;
-  readonly vcnName: string | null;
-  readonly subnetId: string | null;
-  readonly subnetName: string | null;
-  readonly newVcn: { name: string; cidr: string; subnetCidr: string } | null;
-  readonly architecture: Architecture;
-  readonly shape: string;
-  readonly shapeIsFlex: boolean;
-  readonly ocpus: number | null;
-  readonly memoryGbs: number | null;
-  readonly diskGbs: number;
-  readonly instanceName: string;
-  readonly assignPublicIp: boolean;
-  readonly sshKeyFile: string;
-  readonly sshPublicKey: string;
-  readonly intervalSeconds: number;
-  readonly image: Image;
-}
-
-export function validateDisk(diskGbs: number): number {
-  if (!Number.isInteger(diskGbs) || diskGbs < LIMITS.diskMinGb || diskGbs > LIMITS.diskMaxGb) {
-    throw new ConfigError(`disk size must be an integer between ${LIMITS.diskMinGb} and ${LIMITS.diskMaxGb} GB (got ${diskGbs})`);
-  }
-  return diskGbs;
-}
-
-export function validateFlexResources(shapeIsFlex: boolean, ocpus: number | null, memoryGbs: number | null): { ocpus: number | null; memoryGbs: number | null } {
-  if (!shapeIsFlex) return { ocpus: null, memoryGbs: null };
-  if (ocpus === null || ocpus < 1 || ocpus > LIMITS.ocpusMax) throw new ConfigError(`OCPUs must be an integer between 1 and ${LIMITS.ocpusMax}`);
-  if (memoryGbs === null || memoryGbs < 1 || memoryGbs > LIMITS.memoryMaxGbs) throw new ConfigError(`memory must be between 1 and ${LIMITS.memoryMaxGbs} GB`);
-  return { ocpus, memoryGbs };
-}
 
 function validateInstanceName(name: string): string {
   const trimmed = name.trim();
@@ -1291,6 +422,7 @@ function validateInstanceName(name: string): string {
   if (trimmed.length > 255) throw new ConfigError('instance name must be at most 255 characters');
   return trimmed;
 }
+
 
 async function resolveImage(oci: Oci, compartmentId: string, architecture: Architecture, shape: string): Promise<Image> {
   const shapes = await oci.listShapes(compartmentId, (await oci.listAvailabilityDomains(compartmentId))[0] ?? '');
@@ -1540,6 +672,44 @@ async function buildPlanJson(oci: Oci, auth: OciAuth, resolved: ResolvedConfig):
     image,
   };
 }
+
+
+function printUsage(): void {
+  process.stdout.write(
+    [
+      `${APP.name} v${appVersion()} — deploy an OCI VM and automatically retry when capacity is unavailable.`,
+      '',
+      'Usage:',
+      '  oci-free-vm [options]',
+      '',
+      'Options:',
+      '  --config <path>           configuration file (default: ./oci-free-vm.yaml)',
+      '  --profile <name>          OCI config profile (default: DEFAULT)',
+      '  --json                    machine-readable JSON output, non-interactive',
+      '  --yes                     skip confirmation prompts',
+      '  --name <name>             instance name',
+      '  --region <region>         OCI region (default: from ~/.oci/config)',
+      '  --compartment-id <ocid>   compartment OCID',
+      '  --arch <arch>             arm64 | x86_64',
+      '  --shape <shape>           instance shape (e.g. VM.Standard.A1.Flex)',
+      '  --ocpus <n>               OCPUs (flexible shapes)',
+      '  --memory <gb>             memory in GB (flexible shapes)',
+      '  --disk <gb>               boot volume size in GB',
+      '  --ssh-key <path>          SSH public key file (default: ~/.ssh/id_ed25519.pub)',
+      '  --public-ip <bool>         "true" or "false"',
+      '  --interval-seconds <n>    retry interval between full AD cycles (default: 900)',
+      '  --network-mode <mode>     existing | create',
+      '  --vcn-id <ocid>           existing VCN OCID',
+      '  --subnet-id <ocid>        existing subnet OCID',
+      '  --version                 print version',
+      '  --help                    print this help',
+      '',
+      'Precedence: CLI arguments > YAML defaults > interactive prompts > application defaults.',
+      '',
+    ].join('\n'),
+  );
+}
+
 
 // ------------------------------------------------------------------- networking
 
