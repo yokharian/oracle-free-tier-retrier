@@ -4,7 +4,7 @@
 // oci-free-vm — deploy an OCI VM and automatically retry when capacity is unavailable.
 // Boring infrastructure, excellent CLI UX.
 
-import { createHash, createPrivateKey, createSign } from 'node:crypto';
+import { createPrivateKey } from 'node:crypto';
 import type { KeyObject } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -17,6 +17,9 @@ import * as p from '@clack/prompts';
 import pc from 'picocolors';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
+import * as ociCommon from 'oci-common';
+import * as ociCore from 'oci-core';
+import * as ociIdentity from 'oci-identity';
 
 // ------------------------------------------------------------------ constants
 
@@ -52,7 +55,6 @@ const LIMITS = {
   defaultVcnName: 'oci-free-vm-vcn',
   defaultVcnCidr: '10.0.0.0/16',
   defaultSubnetCidr: '10.0.0.0/24',
-  requestTimeoutMs: 30_000,
 } as const;
 
 const EXIT = {
@@ -506,6 +508,8 @@ export interface OciAuth {
   readonly region: string;
   readonly keyFile: string;
   readonly privateKey: KeyObject;
+  readonly privateKeyPem: string;
+  readonly passphrase?: string | undefined;
 }
 
 export async function loadOciAuth(profileName: string | undefined): Promise<OciAuth> {
@@ -548,6 +552,8 @@ export async function loadOciAuth(profileName: string | undefined): Promise<OciA
     region: section['region'] ?? '',
     keyFile,
     privateKey,
+    privateKeyPem: pem,
+    ...(section['pass_phrase'] === undefined || section['pass_phrase'] === '' ? {} : { passphrase: section['pass_phrase'] }),
   };
 }
 
@@ -556,94 +562,67 @@ export function probeBinary(name: string): boolean {
   return result.error === undefined;
 }
 
-// -------------------------------------------------------------- request signing
+// ------------------------------------------------------------ official SDK types
 
-/** OCI request signing, signature version 1 (RFC 1945 style date, RSA-SHA256). */
-export function buildSignedHeaders(args: {
-  method: 'GET' | 'POST' | 'PUT';
-  url: URL;
-  key: KeyObject;
-  keyId: string;
-  body?: string | undefined;
-  date: Date;
-}): Record<string, string> {
-  const date = args.date.toUTCString();
-  const target = `${args.method.toLowerCase()} ${args.url.pathname}${args.url.search}`;
-  const lines: string[] = [`date: ${date}`, `(request-target): ${target}`, `host: ${args.url.host}`];
-  const names = ['date', '(request-target)', 'host'];
-  let digest: string | undefined;
-  if (args.body !== undefined) {
-    digest = createHash('sha256').update(args.body).digest('base64');
-    lines.push(`content-type: application/json`, `content-length: ${Buffer.byteLength(args.body)}`, `x-content-sha256: ${digest}`);
-    names.push('content-type', 'content-length', 'x-content-sha256');
-  }
-  const signer = createSign('RSA-SHA256');
-  signer.update(lines.join('\n'));
-  const signature = signer.sign(args.key, 'base64');
-  const headers: Record<string, string> = {
-    date,
-    authorization: `Signature version="1",keyId="${args.keyId}",algorithm="rsa-sha256",signature="${signature}",headers="${names.join(' ')}"`,
-  };
-  if (digest !== undefined) {
-    headers['content-type'] = 'application/json';
-    headers['x-content-sha256'] = digest;
-  }
-  return headers;
+export interface Compartment {
+  readonly id: string;
+  readonly name: string;
+  readonly lifecycleState: string;
 }
 
-// ------------------------------------------------------------------- OCI client
+export interface Vcn {
+  readonly id: string;
+  readonly displayName: string | null;
+  readonly defaultRouteTableId?: string | null | undefined;
+  readonly defaultSecurityListId?: string | null | undefined;
+}
 
-type Service = 'identity' | 'network' | 'compute';
-const SERVICE_HOST_PREFIX = { identity: 'identity', network: 'iaas', compute: 'iaas' } as const satisfies Record<Service, string>;
+export interface Subnet {
+  readonly id: string;
+  readonly displayName: string | null;
+  readonly vcnId: string;
+  readonly availabilityDomain?: string | null | undefined;
+}
 
-const compartmentSchema = z.object({ id: z.string(), name: z.string(), lifecycleState: z.string() }).passthrough();
-const vcnSchema = z
-  .object({
-    id: z.string(),
-    displayName: z.string().nullable(),
-    defaultRouteTableId: z.string().nullish(),
-    defaultSecurityListId: z.string().nullish(),
-  })
-  .passthrough();
-const subnetSchema = z
-  .object({ id: z.string(), displayName: z.string().nullable(), vcnId: z.string(), availabilityDomain: z.string().nullish() })
-  .passthrough();
-const shapeSchema = z.object({ shape: z.string() }).passthrough();
-const imageSchema = z
-  .object({
-    id: z.string(),
-    operatingSystem: z.string(),
-    operatingSystemVersion: z.string(),
-    timeCreated: z.string().nullish(),
-  })
-  .passthrough();
-const instanceSchema = z.object({ id: z.string(), displayName: z.string().nullable(), lifecycleState: z.string() }).passthrough();
-const bootVolumeSchema = z.object({ sizeInGBs: z.number().nullish(), displayName: z.string().nullish() }).passthrough();
-const idObjectSchema = z.object({ id: z.string() }).passthrough();
-const routeTableSchema = z.object({ id: z.string(), routeRules: z.array(z.record(z.string(), z.unknown())).nullish() }).passthrough();
-const securityListSchema = z
-  .object({
-    id: z.string(),
-    ingressSecurityRules: z.array(z.record(z.string(), z.unknown())).nullish(),
-    egressSecurityRules: z.array(z.record(z.string(), z.unknown())).nullish(),
-  })
-  .passthrough();
-const errorBodySchema = z.object({ code: z.string().optional(), message: z.string().optional() }).passthrough();
+export interface Image {
+  readonly id: string;
+  readonly operatingSystem: string;
+  readonly operatingSystemVersion: string;
+  readonly timeCreated?: string | null | undefined;
+}
 
-export type Compartment = z.infer<typeof compartmentSchema>;
-export type Vcn = z.infer<typeof vcnSchema>;
-export type Subnet = z.infer<typeof subnetSchema>;
-export type Image = z.infer<typeof imageSchema>;
-export type Instance = z.infer<typeof instanceSchema>;
-export type RouteTable = z.infer<typeof routeTableSchema>;
-export type SecurityList = z.infer<typeof securityListSchema>;
+export interface Instance {
+  readonly id: string;
+  readonly displayName: string | null;
+  readonly lifecycleState: string;
+}
 
-function safeJsonParse(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return undefined; // no-excuse-ok: catch — non-JSON body falls back to a plain message
-  }
+export interface BootVolume {
+  readonly displayName: string | null;
+  readonly sizeInGBs: number | null;
+}
+
+export interface RouteTable {
+  readonly id: string;
+  readonly routeRules?: readonly unknown[] | null | undefined;
+}
+
+export interface SecurityList {
+  readonly id: string;
+  readonly ingressSecurityRules: readonly ociCore.models.IngressSecurityRule[];
+  readonly egressSecurityRules: readonly ociCore.models.EgressSecurityRule[];
+}
+
+function cleanIngressRule(rule: ociCore.models.IngressSecurityRule): ociCore.models.IngressSecurityRule {
+  const serialized = ociCommon.ObjectSerializer.serialize(rule, 'IngressSecurityRule');
+  const parsed = typeof serialized === 'string' ? JSON.parse(serialized) : serialized;
+  return JSON.parse(JSON.stringify(stripNulls(parsed)));
+}
+
+function cleanEgressRule(rule: ociCore.models.EgressSecurityRule): ociCore.models.EgressSecurityRule {
+  const serialized = ociCommon.ObjectSerializer.serialize(rule, 'EgressSecurityRule');
+  const parsed = typeof serialized === 'string' ? JSON.parse(serialized) : serialized;
+  return JSON.parse(JSON.stringify(stripNulls(parsed)));
 }
 
 export interface LaunchInstanceDetails {
@@ -653,7 +632,7 @@ export interface LaunchInstanceDetails {
   readonly shape: string;
   readonly shapeConfig?: { readonly ocpus: number; readonly memoryInGBs: number };
   readonly sourceDetails: { readonly sourceType: 'image'; readonly imageId: string; readonly bootVolumeSizeInGBs: number };
-  readonly createVnicDetails: { readonly subnetId: string; readonly assignPublicIp: 'YES' | 'NO' };
+  readonly createVnicDetails: { readonly subnetId: string; readonly assignPublicIp: boolean };
   readonly metadata: { readonly ssh_authorized_keys: string };
 }
 
@@ -678,7 +657,7 @@ export function buildLaunchBody(args: {
     shape: string;
     shapeConfig?: { ocpus: number; memoryInGBs: number };
     sourceDetails: { sourceType: 'image'; imageId: string; bootVolumeSizeInGBs: number };
-    createVnicDetails: { subnetId: string; assignPublicIp: 'YES' | 'NO' };
+    createVnicDetails: { subnetId: string; assignPublicIp: boolean };
     metadata: { ssh_authorized_keys: string };
   } = {
     availabilityDomain: args.availabilityDomain,
@@ -689,7 +668,7 @@ export function buildLaunchBody(args: {
       ? { shapeConfig: { ocpus: args.ocpus, memoryInGBs: args.memoryGbs } }
       : {}),
     sourceDetails: { sourceType: 'image', imageId: args.imageId, bootVolumeSizeInGBs: args.diskGbs },
-    createVnicDetails: { subnetId: args.subnetId, assignPublicIp: args.assignPublicIp ? 'YES' : 'NO' },
+    createVnicDetails: { subnetId: args.subnetId, assignPublicIp: args.assignPublicIp },
     metadata: { ssh_authorized_keys: args.sshPublicKey },
   };
   return body;
@@ -697,182 +676,280 @@ export function buildLaunchBody(args: {
 
 export class Oci {
   private readonly auth: OciAuth;
-  private readonly fetchFn: typeof fetch;
-  private readonly endpointOverride: string | undefined;
-  private readonly now: () => Date;
+  private readonly identityClient: ociIdentity.IdentityClient;
+  private readonly networkClient: ociCore.VirtualNetworkClient;
+  private readonly computeClient: ociCore.ComputeClient;
+  private readonly blockstorageClient: ociCore.BlockstorageClient;
 
   constructor(
     auth: OciAuth,
-    deps: { fetchFn?: typeof fetch | undefined; endpointOverride?: string | undefined; now?: (() => Date) | undefined } = {},
+    deps: { endpointOverride?: string | undefined } = {},
   ) {
     this.auth = auth;
-    this.fetchFn = deps.fetchFn ?? fetch;
-    this.endpointOverride = deps.endpointOverride ?? process.env['OCI_FREE_VM_ENDPOINT'];
-    this.now = deps.now ?? (() => new Date());
+    const provider = new ociCommon.SimpleAuthenticationDetailsProvider(
+      auth.tenancy,
+      auth.user,
+      auth.fingerprint,
+      auth.privateKeyPem,
+      auth.passphrase ?? null,
+      ociCommon.Region.fromRegionId(auth.region),
+    );
+    this.identityClient = new ociIdentity.IdentityClient({ authenticationDetailsProvider: provider });
+    this.networkClient = new ociCore.VirtualNetworkClient({ authenticationDetailsProvider: provider });
+    this.computeClient = new ociCore.ComputeClient({ authenticationDetailsProvider: provider });
+    this.blockstorageClient = new ociCore.BlockstorageClient({ authenticationDetailsProvider: provider });
+    const endpoint = deps.endpointOverride ?? process.env['OCI_FREE_VM_ENDPOINT'];
+    if (endpoint !== undefined) {
+      for (const client of [this.identityClient, this.networkClient, this.computeClient, this.blockstorageClient]) {
+        client.endpoint = endpoint;
+      }
+    }
   }
 
-  private baseUrl(service: Service): string {
-    if (this.endpointOverride !== undefined) {
-      return this.endpointOverride.replace(/\/+$/, '');
-    }
-    return `https://${SERVICE_HOST_PREFIX[service]}.${this.auth.region}.oraclecloud.com`;
-  }
-
-  private async request<S extends z.ZodType>(
-    service: Service,
-    method: 'GET' | 'POST' | 'PUT',
-    operation: string,
-    path: string,
-    opts: { query?: Record<string, string | undefined>; body?: unknown; schema: S },
-  ): Promise<z.infer<S>> {
-    const url = new URL(this.baseUrl(service) + path);
-    for (const [key, value] of Object.entries(opts.query ?? {})) {
-      if (value !== undefined) url.searchParams.set(key, value);
-    }
-    const body = opts.body === undefined ? undefined : JSON.stringify(opts.body);
-    const headers = buildSignedHeaders({
-      method,
-      url,
-      key: this.auth.privateKey,
-      keyId: `${this.auth.tenancy}/${this.auth.user}/${this.auth.fingerprint}`,
-      body,
-      date: this.now(),
-    });
-    headers['accept'] = 'application/json';
-    if (body === undefined) headers['content-type'] = 'application/json';
-    let response: Response;
+  private async call<T>(operation: string, work: () => Promise<T>): Promise<T> {
     try {
-      response = await this.fetchFn(url, { method, headers, ...(body === undefined ? {} : { body }), signal: AbortSignal.timeout(LIMITS.requestTimeoutMs) });
+      return await work();
     } catch (error) {
-      if (error instanceof TypeError || (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError'))) {
-        throw new NetworkError(`${operation}: ${error.message}`);
+      if (error instanceof ociCommon.OciError) {
+        const code = error.serviceCode === '' ? undefined : error.serviceCode;
+        throw new OciHttpError(operation, error.statusCode, code, sanitize(error.message));
+      }
+      if (
+        error instanceof TypeError ||
+        (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) ||
+        (error instanceof Error && 'code' in error && typeof error.code === 'string' && /^E(CONN|TIMEDOUT|NOTFOUND|AI_AGAIN|CONNREFUSED|CONNRESET|HOSTUNREACH)/.test(error.code))
+      ) {
+        throw new NetworkError(`${operation}: ${error instanceof Error ? error.message : String(error)}`);
       }
       throw error;
     }
-    const text = await response.text();
-    if (!response.ok) {
-      const parsed = safeJsonParse(text);
-      const checked = parsed === undefined ? null : errorBodySchema.safeParse(parsed);
-      const code = checked?.success ? checked.data.code : undefined;
-      const message = checked?.success && checked.data.message !== undefined ? checked.data.message : `${operation} failed (HTTP ${response.status})`;
-      throw new OciHttpError(operation, response.status, code, sanitize(message));
-    }
-    if (text.trim() === '') return opts.schema.parse([]);
-    return opts.schema.parse(safeJsonParse(text));
   }
 
-  listCompartments(): Promise<Compartment[]> {
-    return this.request('identity', 'GET', 'ListCompartments', '/20160918/compartments', {
-      query: {
+  async listCompartments(): Promise<Compartment[]> {
+    return this.call('ListCompartments', async () => {
+      const response = await this.identityClient.listCompartments({
         compartmentId: this.auth.tenancy,
-        compartmentIdInSubtree: 'true',
-        accessLevel: 'ACCESSIBLE',
-        lifecycleState: 'ACTIVE',
-      },
-      schema: z.array(compartmentSchema),
+        compartmentIdInSubtree: true,
+        accessLevel: ociIdentity.requests.ListCompartmentsRequest.AccessLevel.Accessible,
+        lifecycleState: ociIdentity.models.Compartment.LifecycleState.Active,
+      });
+      return (response.items ?? []).map(
+        (compartment): Compartment => ({
+          id: compartment.id ?? '',
+          name: compartment.name ?? '',
+          lifecycleState: compartment.lifecycleState ?? '',
+        }),
+      );
     });
   }
 
-  listAvailabilityDomains(compartmentId: string): Promise<string[]> {
-    return this.request('identity', 'GET', 'ListAvailabilityDomains', '/20160918/availabilityDomains', {
-      query: { compartmentId },
-      schema: z.array(z.object({ name: z.string() }).passthrough()),
-    }).then((ads) => ads.map((ad) => ad.name));
-  }
-
-  listVcns(compartmentId: string): Promise<Vcn[]> {
-    return this.request('network', 'GET', 'ListVcns', '/20160918/vcns', {
-      query: { compartmentId },
-      schema: z.array(vcnSchema),
+  async listAvailabilityDomains(compartmentId: string): Promise<string[]> {
+    return this.call('ListAvailabilityDomains', async () => {
+      const response = await this.identityClient.listAvailabilityDomains({ compartmentId });
+      return (response.items ?? []).map((ad) => ad.name ?? '');
     });
   }
 
-  listSubnets(compartmentId: string, vcnId: string): Promise<Subnet[]> {
-    return this.request('network', 'GET', 'ListSubnets', '/20160918/subnets', {
-      query: { compartmentId, vcnId },
-      schema: z.array(subnetSchema),
+  async listVcns(compartmentId: string): Promise<Vcn[]> {
+    return this.call('ListVcns', async () => {
+      const response = await this.networkClient.listVcns({ compartmentId });
+      return (response.items ?? []).map(
+        (vcn): Vcn => ({
+          id: vcn.id ?? '',
+          displayName: vcn.displayName ?? null,
+          defaultRouteTableId: vcn.defaultRouteTableId ?? undefined,
+          defaultSecurityListId: vcn.defaultSecurityListId ?? undefined,
+        }),
+      );
     });
   }
 
-  listShapes(compartmentId: string, availabilityDomain: string): Promise<string[]> {
-    return this.request('compute', 'GET', 'ListShapes', '/20160918/shapes', {
-      query: { compartmentId, availabilityDomain },
-      schema: z.array(shapeSchema),
-    }).then((shapes) => [...new Set(shapes.map((s) => s.shape))].sort());
-  }
-
-  listImages(compartmentId: string, shape: string): Promise<Image[]> {
-    return this.request('compute', 'GET', 'ListImages', '/20160918/images', {
-      query: { compartmentId, operatingSystem: 'Canonical Ubuntu', shape, sortOrder: 'DESC' },
-      schema: z.array(imageSchema),
+  async listSubnets(compartmentId: string, vcnId: string): Promise<Subnet[]> {
+    return this.call('ListSubnets', async () => {
+      const response = await this.networkClient.listSubnets({ compartmentId, vcnId });
+      return (response.items ?? []).map(
+        (subnet): Subnet => ({
+          id: subnet.id ?? '',
+          displayName: subnet.displayName ?? null,
+          vcnId: subnet.vcnId ?? '',
+          availabilityDomain: subnet.availabilityDomain ?? undefined,
+        }),
+      );
     });
   }
 
-  listInstances(compartmentId: string, displayName?: string): Promise<Instance[]> {
-    return this.request('compute', 'GET', 'ListInstances', '/20160918/instances', {
-      query: { compartmentId, displayName },
-      schema: z.array(instanceSchema),
+  async listShapes(compartmentId: string, availabilityDomain: string): Promise<string[]> {
+    return this.call('ListShapes', async () => {
+      const response = await this.computeClient.listShapes({ compartmentId, availabilityDomain });
+      return [...new Set((response.items ?? []).map((shape) => shape.shape ?? ''))].filter((s) => s !== '').sort();
     });
   }
 
-  listBootVolumes(compartmentId: string, availabilityDomain: string): Promise<z.infer<typeof bootVolumeSchema>[]> {
-    return this.request('compute', 'GET', 'ListBootVolumes', '/20160918/bootVolumes', {
-      query: { compartmentId, availabilityDomain },
-      schema: z.array(bootVolumeSchema),
+  async listImages(compartmentId: string, shape: string): Promise<Image[]> {
+    return this.call('ListImages', async () => {
+      const response = await this.computeClient.listImages({
+        compartmentId,
+        operatingSystem: 'Canonical Ubuntu',
+        shape,
+        sortOrder: ociCore.requests.ListImagesRequest.SortOrder.Desc,
+      });
+      return (response.items ?? []).map(
+        (image): Image => ({
+          id: image.id ?? '',
+          operatingSystem: image.operatingSystem ?? '',
+          operatingSystemVersion: image.operatingSystemVersion ?? '',
+          timeCreated:
+            image.timeCreated === undefined || image.timeCreated === null
+              ? undefined
+              : image.timeCreated instanceof Date
+                ? image.timeCreated.toISOString()
+                : String(image.timeCreated),
+        }),
+      );
     });
   }
 
-  launchInstance(details: LaunchInstanceDetails): Promise<Instance> {
-    return this.request('compute', 'POST', 'LaunchInstance', '/20160918/instances/', {
-      body: details,
-      schema: instanceSchema,
+  async listInstances(compartmentId: string, displayName?: string): Promise<Instance[]> {
+    return this.call('ListInstances', async () => {
+      const response = await this.computeClient.listInstances({
+        compartmentId,
+        ...(displayName === undefined ? {} : { displayName }),
+      });
+      return (response.items ?? []).map(
+        (instance): Instance => ({
+          id: instance.id ?? '',
+          displayName: instance.displayName ?? null,
+          lifecycleState: instance.lifecycleState ?? '',
+        }),
+      );
     });
   }
 
-  createVcn(args: { compartmentId: string; displayName: string; cidr: string }): Promise<Vcn> {
-    return this.request('network', 'POST', 'CreateVcn', '/20160918/vcns', {
-      body: { compartmentId: args.compartmentId, displayName: args.displayName, cidrBlocks: [args.cidr] },
-      schema: vcnSchema,
+  async listBootVolumes(compartmentId: string, availabilityDomain: string): Promise<BootVolume[]> {
+    return this.call('ListBootVolumes', async () => {
+      const response = await this.blockstorageClient.listBootVolumes({ compartmentId, availabilityDomain });
+      return (response.items ?? []).map(
+        (volume): BootVolume => ({ displayName: volume.displayName ?? null, sizeInGBs: volume.sizeInGBs ?? null }),
+      );
     });
   }
 
-  createInternetGateway(args: { compartmentId: string; vcnId: string; displayName: string }): Promise<z.infer<typeof idObjectSchema>> {
-    return this.request('network', 'POST', 'CreateInternetGateway', '/20160918/internetGateways', {
-      body: { compartmentId: args.compartmentId, vcnId: args.vcnId, displayName: args.displayName, isEnabled: true },
-      schema: idObjectSchema,
+  async launchInstance(details: LaunchInstanceDetails): Promise<Instance> {
+    return this.call('LaunchInstance', async () => {
+      const response = await this.computeClient.launchInstance({
+        launchInstanceDetails: {
+          availabilityDomain: details.availabilityDomain,
+          compartmentId: details.compartmentId,
+          displayName: details.displayName,
+          shape: details.shape,
+          ...(details.shapeConfig === undefined ? {} : { shapeConfig: details.shapeConfig }),
+          sourceDetails: details.sourceDetails,
+          createVnicDetails: details.createVnicDetails,
+          metadata: details.metadata,
+        },
+      });
+      const instance = response.instance;
+      return { id: instance?.id ?? '', displayName: instance?.displayName ?? null, lifecycleState: instance?.lifecycleState ?? '' };
     });
   }
 
-  updateRouteTable(id: string, routeRules: RouteTable['routeRules']): Promise<RouteTable> {
-    return this.request('network', 'PUT', 'UpdateRouteTable', `/20160918/routeTables/${id}`, {
-      body: { routeRules: routeRules ?? [] },
-      schema: routeTableSchema,
+  async createVcn(args: { compartmentId: string; displayName: string; cidr: string }): Promise<Vcn> {
+    return this.call('CreateVcn', async () => {
+      const response = await this.networkClient.createVcn({
+        createVcnDetails: {
+          compartmentId: args.compartmentId,
+          displayName: args.displayName,
+          cidrBlocks: [args.cidr],
+        },
+      });
+      const vcn = response.vcn;
+      return {
+        id: vcn?.id ?? '',
+        displayName: vcn?.displayName ?? null,
+        defaultRouteTableId: vcn?.defaultRouteTableId ?? undefined,
+        defaultSecurityListId: vcn?.defaultSecurityListId ?? undefined,
+      };
     });
   }
 
-  getSecurityList(id: string): Promise<SecurityList> {
-    return this.request('network', 'GET', 'GetSecurityList', `/20160918/securityLists/${id}`, {
-      schema: securityListSchema,
+  async createInternetGateway(args: { compartmentId: string; vcnId: string; displayName: string }): Promise<{ readonly id: string }> {
+    return this.call('CreateInternetGateway', async () => {
+      const response = await this.networkClient.createInternetGateway({
+        createInternetGatewayDetails: {
+          compartmentId: args.compartmentId,
+          vcnId: args.vcnId,
+          displayName: args.displayName,
+          isEnabled: true,
+        },
+      });
+      return { id: response.internetGateway?.id ?? '' };
     });
   }
 
-  updateSecurityList(id: string, ingress: SecurityList['ingressSecurityRules'], egress: SecurityList['egressSecurityRules']): Promise<SecurityList> {
-    return this.request('network', 'PUT', 'UpdateSecurityList', `/20160918/securityLists/${id}`, {
-      body: { ingressSecurityRules: stripNulls(ingress ?? []), egressSecurityRules: stripNulls(egress ?? []) },
-      schema: securityListSchema,
+  async updateRouteTable(id: string, routeRules: readonly ociCore.models.RouteRule[]): Promise<RouteTable> {
+    return this.call('UpdateRouteTable', async () => {
+      const response = await this.networkClient.updateRouteTable({
+        rtId: id,
+        updateRouteTableDetails: {
+          routeRules: [...routeRules],
+        },
+      });
+      return { id: response.routeTable?.id ?? '', routeRules: response.routeTable?.routeRules ?? [] };
     });
   }
 
-  createSubnet(args: { compartmentId: string; vcnId: string; displayName: string; cidr: string }): Promise<Subnet> {
-    return this.request('network', 'POST', 'CreateSubnet', '/20160918/subnets', {
-      body: {
-        compartmentId: args.compartmentId,
-        vcnId: args.vcnId,
-        displayName: args.displayName,
-        cidrBlock: args.cidr,
-        prohibitPublicIpOnVcn: false,
-      },
-      schema: subnetSchema,
+  async getSecurityList(id: string): Promise<SecurityList> {
+    return this.call('GetSecurityList', async () => {
+      const response = await this.networkClient.getSecurityList({ securityListId: id });
+      const securityList = response.securityList;
+      return {
+        id: securityList?.id ?? '',
+        ingressSecurityRules: (securityList?.ingressSecurityRules ?? []).map(cleanIngressRule),
+        egressSecurityRules: (securityList?.egressSecurityRules ?? []).map(cleanEgressRule),
+      };
+    });
+  }
+
+  async updateSecurityList(
+    id: string,
+    ingress: readonly ociCore.models.IngressSecurityRule[],
+    egress: readonly ociCore.models.EgressSecurityRule[],
+  ): Promise<SecurityList> {
+    return this.call('UpdateSecurityList', async () => {
+      const response = await this.networkClient.updateSecurityList({
+        securityListId: id,
+        updateSecurityListDetails: {
+          ingressSecurityRules: [...ingress],
+          egressSecurityRules: [...egress],
+        },
+      });
+      const securityList = response.securityList;
+      return {
+        id: securityList?.id ?? '',
+        ingressSecurityRules: securityList?.ingressSecurityRules ?? [],
+        egressSecurityRules: securityList?.egressSecurityRules ?? [],
+      };
+    });
+  }
+
+  async createSubnet(args: { compartmentId: string; vcnId: string; displayName: string; cidr: string }): Promise<Subnet> {
+    return this.call('CreateSubnet', async () => {
+      const response = await this.networkClient.createSubnet({
+        createSubnetDetails: {
+          compartmentId: args.compartmentId,
+          vcnId: args.vcnId,
+          displayName: args.displayName,
+          cidrBlock: args.cidr,
+          prohibitPublicIpOnVnic: false,
+        },
+      });
+      const subnet = response.subnet;
+      return {
+        id: subnet?.id ?? '',
+        displayName: subnet?.displayName ?? null,
+        vcnId: subnet?.vcnId ?? '',
+        availabilityDomain: subnet?.availabilityDomain ?? undefined,
+      };
     });
   }
 }
@@ -1484,20 +1561,20 @@ async function prepareNetwork(oci: Oci, compartmentId: string, plan: DeploymentP
       await oci.updateRouteTable(vcn.defaultRouteTableId, [
         {
           destination: '0.0.0.0/0',
-          destinationType: 'CIDR_BLOCK',
+          destinationType: ociCore.models.RouteRule.DestinationType.CidrBlock,
           networkEntityId: gateway.id,
-          routeType: 'STATIC',
+          routeType: ociCore.models.RouteRule.RouteType.Static,
         },
       ]);
     }
     if (vcn.defaultSecurityListId !== null && vcn.defaultSecurityListId !== undefined) {
       const securityList = await oci.getSecurityList(vcn.defaultSecurityListId);
-      const sshRule = {
+      const sshRule: ociCore.models.IngressSecurityRule = {
         source: '0.0.0.0/0',
-        sourceType: 'CIDR',
+        sourceType: ociCore.models.IngressSecurityRule.SourceType.CidrBlock,
         protocol: '6',
         isStateless: false,
-        tcpOptions: { destinationPortRange: { min: 22, max: 22, sourcePortRange: { min: 1, max: 65535 } } },
+        tcpOptions: { destinationPortRange: { min: 22, max: 22 }, sourcePortRange: { min: 1, max: 65535 } },
       };
       await oci.updateSecurityList(
         vcn.defaultSecurityListId,
@@ -1667,8 +1744,7 @@ function buildDefaultsOut(plan: DeploymentPlan, region: string, network: Network
 // ------------------------------------------------------------------------ run
 
 export interface RunDeps {
-  readonly fetchFn?: typeof fetch;
-  readonly endpointOverride?: string;
+  readonly endpointOverride?: string | undefined;
   readonly now?: () => Date;
   readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   readonly signal?: AbortSignal;
@@ -1701,7 +1777,7 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
     loaded = await loadYamlConfig(configPath);
     const resolved = resolveConfig(loaded.data.defaults, cli);
     const auth = await loadOciAuth(cli.profile);
-    const oci = new Oci(auth, { fetchFn: deps.fetchFn, endpointOverride: deps.endpointOverride, now });
+    const oci = new Oci(auth, { endpointOverride: deps.endpointOverride });
 
     io.intro(`${APP.name} v${appVersion()}`);
     plan = cli.jsonMode ? await buildPlanJson(oci, auth, resolved) : await buildPlanInteractive(io, oci, auth, resolved);

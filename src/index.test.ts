@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, createVerify, generateKeyPairSync } from 'node:crypto';
+import { generateKeyPairSync } from 'node:crypto';
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,7 +15,6 @@ import {
   appVersion,
   attemptLogFileName,
   buildLaunchBody,
-  buildSignedHeaders,
   classifyFailure,
   deployWithRetry,
   jsonIo,
@@ -42,6 +41,8 @@ const FIXED_DATE = new Date('2026-10-18T10:00:00Z');
 const KEY_PAIR = generateKeyPairSync('rsa', { modulusLength: 2048 });
 
 function makeAuth(): OciAuth {
+  const pem = KEY_PAIR.privateKey.export({ type: 'pkcs8', format: 'pem' });
+  if (typeof pem !== 'string') throw new Error('expected PEM string export');
   return {
     user: 'ocid1.user.oc1..test',
     tenancy: 'ocid1.tenancy.oc1..test',
@@ -49,6 +50,7 @@ function makeAuth(): OciAuth {
     region: 'us-ashburn-1',
     keyFile: 'test-key.pem',
     privateKey: KEY_PAIR.privateKey,
+    privateKeyPem: pem,
   };
 }
 
@@ -199,7 +201,7 @@ class MockOci {
     if (req.method === 'POST' && path === '/20160918/subnets') {
       return send(200, { id: 'ocid1.subnet.oc1..created', displayName: 'created-subnet', vcnId: 'ocid1.vcn.oc1..created', availabilityDomain: null });
     }
-    if (req.method === 'POST' && path === '/20160918/instances/') {
+    if (req.method === 'POST' && (path === '/20160918/instances/' || path === '/20160918/instances')) {
       const parsed: unknown = JSON.parse(bodyText);
       const displayName =
         parsed !== null && typeof parsed === 'object' && 'displayName' in parsed && typeof parsed.displayName === 'string'
@@ -477,38 +479,6 @@ describe('parseOciConfigText', () => {
   });
 });
 
-describe('buildSignedHeaders', () => {
-  it('signs POST bodies verifiably with the OCI v1 header list', () => {
-    const url = new URL('https://iaas.us-ashburn-1.oraclecloud.com/20160918/instances/?compartmentId=ocid1');
-    const body = '{"displayName":"devbox"}';
-    const headers = buildSignedHeaders({ method: 'POST', url, key: KEY_PAIR.privateKey, keyId: 'tenancy/user/fp', body, date: FIXED_DATE });
-    const authorization = headers['authorization'] ?? '';
-    assert.match(
-      authorization,
-      /^Signature version="1",keyId="tenancy\/user\/fp",algorithm="rsa-sha256",signature="[^"]+",headers="date \(request-target\) host content-type content-length x-content-sha256"$/,
-    );
-    assert.equal(headers['x-content-sha256'], createHash('sha256').update(body).digest('base64'));
-    const signingString = [
-      `date: ${FIXED_DATE.toUTCString()}`,
-      '(request-target): post /20160918/instances/?compartmentId=ocid1',
-      'host: iaas.us-ashburn-1.oraclecloud.com',
-      'content-type: application/json',
-      `content-length: ${Buffer.byteLength(body)}`,
-      `x-content-sha256: ${headers['x-content-sha256']}`,
-    ].join('\n');
-    const signature = /signature="([^"]+)"/.exec(authorization)?.[1] ?? '';
-    const verifier = createVerify('RSA-SHA256');
-    verifier.update(signingString);
-    assert.equal(verifier.verify(KEY_PAIR.publicKey, signature, 'base64'), true);
-  });
-  it('signs GET requests with the minimal header list', () => {
-    const url = new URL('https://identity.us-ashburn-1.oraclecloud.com/20160918/compartments');
-    const headers = buildSignedHeaders({ method: 'GET', url, key: KEY_PAIR.privateKey, keyId: 'tenancy/user/fp', date: FIXED_DATE });
-    assert.equal('x-content-sha256' in headers, false);
-    assert.match(headers['authorization'] ?? '', /headers="date \(request-target\) host"$/);
-  });
-});
-
 describe('buildLaunchBody', () => {
   const base = {
     availabilityDomain: 'fNXZ:US-ASHBURN-AD-1',
@@ -525,13 +495,13 @@ describe('buildLaunchBody', () => {
     const body = buildLaunchBody({ ...base, shapeIsFlex: true, ocpus: 4, memoryGbs: 24 });
     assert.deepEqual(body.shapeConfig, { ocpus: 4, memoryInGBs: 24 });
     assert.deepEqual(body.sourceDetails, { sourceType: 'image', imageId: 'ocid1.image.oc1..ubuntu2404', bootVolumeSizeInGBs: 250 });
-    assert.deepEqual(body.createVnicDetails, { subnetId: 'ocid1.subnet.oc1..s1', assignPublicIp: 'YES' });
+    assert.deepEqual(body.createVnicDetails, { subnetId: 'ocid1.subnet.oc1..s1', assignPublicIp: true });
     assert.deepEqual(body.metadata, { ssh_authorized_keys: 'ssh-ed25519 AAAAtest test' });
   });
   it('omits shape config for fixed shapes and maps public ip off', () => {
     const body = buildLaunchBody({ ...base, shape: 'VM.Standard.E2.1.Micro', shapeIsFlex: false, ocpus: 1, memoryGbs: 1, assignPublicIp: false });
     assert.equal('shapeConfig' in body, false);
-    assert.deepEqual(body.createVnicDetails, { subnetId: 'ocid1.subnet.oc1..s1', assignPublicIp: 'NO' });
+    assert.deepEqual(body.createVnicDetails, { subnetId: 'ocid1.subnet.oc1..s1', assignPublicIp: false });
   });
 });
 
