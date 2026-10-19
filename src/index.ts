@@ -726,6 +726,8 @@ export class Oci {
       body,
       date: this.now(),
     });
+    headers['accept'] = 'application/json';
+    if (body === undefined) headers['content-type'] = 'application/json';
     let response: Response;
     try {
       response = await this.fetchFn(url, { method, headers, ...(body === undefined ? {} : { body }), signal: AbortSignal.timeout(LIMITS.requestTimeoutMs) });
@@ -1228,11 +1230,14 @@ async function buildPlanInteractive(
     ...compartments.map((c) => ({ value: c.id, label: c.name })),
     { value: auth.tenancy, label: 'Tenancy (root)' },
   ];
-  const compartmentId =
+  const compartmentDisplayName = (id: string): string => {
+    const found = compartments.find((c) => c.id === id);
+    return found?.name ?? (id === auth.tenancy ? 'Tenancy (root)' : id);
+  };
+  let compartmentId =
     resolved.compartmentId ??
     (await io.select('Select a compartment', compartmentOptions, compartments[0]?.id ?? auth.tenancy));
-  const compartment = compartments.find((c) => c.id === compartmentId);
-  const compartmentName = compartment?.name ?? (compartmentId === auth.tenancy ? 'Tenancy (root)' : compartmentId);
+  let compartmentName = compartmentDisplayName(compartmentId);
 
   let networkMode = resolved.networkMode;
   let vcnId = resolved.vcnId;
@@ -1254,28 +1259,39 @@ async function buildPlanInteractive(
     const subnetCidr = await io.text('Subnet CIDR', { initial: APP_DEFAULTS.subnetCidr });
     newVcn = { name: name.trim(), cidr: cidr.trim(), subnetCidr: subnetCidr.trim() };
   } else {
-    const vcns = await oci.listVcns(compartmentId);
-    if (vcnId === null) {
-      if (vcns.length === 0) throw new ConfigError('no VCNs found in this compartment; choose "Create a new VCN"');
-      vcnId = await io.select(
-        'Available VCNs',
-        vcns.map((vcn) => ({ value: vcn.id, label: vcn.displayName ?? vcn.id })),
-      );
+    for (;;) {
+      try {
+        const vcns = await oci.listVcns(compartmentId);
+        if (vcnId === null) {
+          if (vcns.length === 0) throw new ConfigError('no VCNs found in this compartment; choose "Create a new VCN"');
+          vcnId = await io.select(
+            'Available VCNs',
+            vcns.map((vcn) => ({ value: vcn.id, label: vcn.displayName ?? vcn.id })),
+          );
+        }
+        const vcn = vcns.find((v) => v.id === vcnId);
+        if (vcn === undefined) throw new ConfigError(`VCN ${vcnId} not found in compartment ${compartmentName}`);
+        vcnName = vcn.displayName ?? vcn.id;
+        const subnets = await oci.listSubnets(compartmentId, vcn.id);
+        if (subnetId === null) {
+          if (subnets.length === 0) throw new ConfigError(`no subnets found in VCN ${vcnName}`);
+          subnetId = await io.select(
+            'Subnet',
+            subnets.map((s) => ({ value: s.id, label: s.displayName ?? s.id })),
+          );
+        }
+        const subnet = subnets.find((s) => s.id === subnetId);
+        if (subnet === undefined) throw new ConfigError(`subnet ${subnetId} not found in VCN ${vcnName}`);
+        subnetName = subnet.displayName ?? subnet.id;
+        break;
+      } catch (error) {
+        const failure = classifyFailure(error);
+        if (failure.kind !== 'auth') throw error;
+        io.warn(`Network discovery failed in "${compartmentName}": ${error instanceof Error ? error.message : String(error)}`);
+        compartmentId = await io.select('Select a different compartment and try again', compartmentOptions, auth.tenancy);
+        compartmentName = compartmentDisplayName(compartmentId);
+      }
     }
-    const vcn = vcns.find((v) => v.id === vcnId);
-    if (vcn === undefined) throw new ConfigError(`VCN ${vcnId} not found in compartment ${compartmentName}`);
-    vcnName = vcn.displayName ?? vcn.id;
-    const subnets = await oci.listSubnets(compartmentId, vcn.id);
-    if (subnetId === null) {
-      if (subnets.length === 0) throw new ConfigError(`no subnets found in VCN ${vcnName}`);
-      subnetId = await io.select(
-        'Subnet',
-        subnets.map((s) => ({ value: s.id, label: s.displayName ?? s.id })),
-      );
-    }
-    const subnet = subnets.find((s) => s.id === subnetId);
-    if (subnet === undefined) throw new ConfigError(`subnet ${subnetId} not found in VCN ${vcnName}`);
-    subnetName = subnet.displayName ?? subnet.id;
   }
 
   const architecture: Architecture = resolved.architecture ?? (await selectArchitecture(io));
