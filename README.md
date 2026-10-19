@@ -1,67 +1,42 @@
-# OCI VM Deployer
+# oci-free-vm
 
-Deploy an OCI VM and automatically retry when capacity is unavailable.
-
-Local-first: OCI credentials stay on your machine — no backend, no database, no account.
-
-## Installation
-
-```bash
-npx oci-free-vm
-```
-
-or:
+Deploy an Oracle Cloud (OCI) VM from your terminal — and keep retrying until one is actually available.
 
 ```bash
 bunx oci-free-vm
 ```
 
-Optional global installation also works:
+Works on **Windows** (10+, PowerShell / Windows Terminal), **macOS** (Apple Silicon and Intel), and **Linux** (x64 and ARM64).
 
-```bash
-npm install -g oci-free-vm
-```
+OCI free-tier capacity is scarce — launch requests frequently fail with *"Out of capacity"*. This tool deploys your VM and, when an Availability Domain is full, automatically moves on to the next one, waiting and retrying until the instance is created or you cancel. Your OCI credentials stay on your machine: no backend, no database, no account.
 
-## Requirements
+## Quick start
 
-- Node.js >= 20 or Bun
-- The Oracle Cloud CLI, installed from <https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm> (Windows, macOS, and Linux instructions there)
-- OCI configuration (`~/.oci/config`), created with `oci setup config`
-- Permissions to create OCI instances
-
-Works on **Windows** (10+, PowerShell / Windows Terminal), **macOS** (Apple Silicon and Intel), and **Linux** (x64 and ARM64). All filesystem operations use the Node/Bun APIs — no bash, sed, awk, or grep required.
-
-## Basic setup
-
-1. Install the Oracle Cloud CLI from <https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm>.
+1. Install the Oracle Cloud CLI — <https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm>
 2. Create your OCI configuration:
 
    ```bash
    oci setup config
    ```
 
-3. Run the deployer:
+3. Deploy:
 
    ```bash
    bunx oci-free-vm
    ```
 
-The CLI checks for the OCI CLI and `~/.oci/config` before doing anything else and tells you exactly what is missing. It reads your existing OCI configuration; you never copy credentials into the tool.
+The CLI checks for the OCI CLI and `~/.oci/config` before doing anything else and tells you exactly what is missing.
 
-## Usage
+## What happens when you run it
 
-Running `bunx oci-free-vm` starts an interactive flow:
+1. Reads your existing OCI configuration — you never paste credentials into the tool.
+2. Guides you through: compartment, networking (use an existing VCN, or have one created with an internet gateway and SSH access), architecture (ARM64 / x86_64), shape, OCPUs, memory, disk size, instance name, SSH public key, and public IP.
+3. Warns when projected storage exceeds 200 GB, shows a complete deployment summary, and asks before creating anything.
+4. Creates the instance, cycling through Availability Domains on capacity errors and retrying until success.
 
-1. selects a compartment,
-2. selects an existing VCN — or creates a new one with an internet gateway, an SSH ingress rule, and a subnet,
-3. picks the CPU architecture (ARM64 or x86_64) and a compatible shape,
-4. configures OCPUs, memory, disk size, instance name, SSH public key, and public IP,
-5. warns when the projected storage exceeds 200 GB,
-6. shows a full deployment summary and asks for confirmation.
+## Configuration
 
-After confirmation it prepares the network, then attempts to launch the instance in every Availability Domain. Out-of-capacity failures automatically move on to the next AD; when no AD has capacity, the CLI waits (default 15 minutes) and retries — until it succeeds or you press Ctrl+C.
-
-### Command-line options
+Values resolve in this order: **CLI arguments > YAML defaults > interactive prompts > application defaults.** Prompts only ask for what is still unresolved.
 
 | Option | Description |
 | --- | --- |
@@ -82,22 +57,9 @@ After confirmation it prepares the network, then attempts to launch the instance
 | `--network-mode existing\|create` | network mode |
 | `--vcn-id <ocid>`, `--subnet-id <ocid>` | existing network ids |
 
-Configuration precedence: **CLI arguments > YAML defaults > interactive prompts > application defaults.** Prompts only ask for values that remain unresolved.
+## The `oci-free-vm.yaml` file
 
-### Exit codes
-
-| Code | Meaning |
-| --- | --- |
-| 0 | Success |
-| 1 | Deployment failure |
-| 2 | Invalid configuration |
-| 3 | Authentication/authorization failure |
-| 4 | User cancelled |
-| 5 | Unexpected error |
-
-## YAML configuration (`oci-free-vm.yaml`)
-
-The YAML file is **not a database**. It persists three things:
+The YAML file next to wherever you run the CLI is **not a database**. It persists three things:
 
 - `defaults` — your most recently used configuration,
 - `state.last_deployment` — the last successful deployment,
@@ -140,36 +102,67 @@ last_error:
   message: "Out of capacity"
 ```
 
-Copy `oci-free-vm.yaml.example` as a starting point, or just run the CLI — it writes the file after your first run. The file stays human-readable and manually editable, and the CLI never writes secrets to it. Run `oci-free-vm --config ./my-config.yaml` to use a different file.
+Copy `oci-free-vm.yaml.example` as a starting point, or just run the CLI — the file is created after your first run. It stays human-readable and manually editable, and secrets are never written to it. Use `--config <path>` for a different file.
 
 ## Retry behavior
 
 - All Availability Domains are tried in order on every cycle.
-- Capacity errors (`Out of capacity` / `Out of host capacity`), rate limits (429), transient 5xx responses, and network failures are retried automatically; authorization failures, invalid parameters, and other non-retryable errors abort immediately with guidance.
+- Capacity errors (`Out of capacity` / `Out of host capacity`), rate limits (429), transient 5xx responses, and network failures are retried automatically; authorization failures, invalid parameters, and other non-retryable errors stop immediately with guidance.
 - An instance-existence check runs before every cycle, so an interrupted or timed-out run never creates a duplicate instance.
 - Cancel at any time with Ctrl+C — no resources are ever deleted, and your last state is preserved in `oci-free-vm.yaml`.
 
-## Logs
+<details>
+<summary><strong>Exit codes</strong></summary>
 
-Every infrastructure attempt writes its own log file under `oci-free-vm-logs/`:
+| Code | Meaning |
+| --- | --- |
+| 0 | Success |
+| 1 | Deployment failure |
+| 2 | Invalid configuration |
+| 3 | Authentication/authorization failure |
+| 4 | User cancelled |
+| 5 | Unexpected error |
 
-```
+</details>
+
+<details>
+<summary><strong>Attempt logs</strong></summary>
+
+Every infrastructure attempt writes its own log under `oci-free-vm-logs/` in the directory where you launched the CLI:
+
+```text
 oci-free-vm-logs/
 ├── 2026-10-05T18-30-00-000Z-attempt-001-AD-1.log
 └── 2026-10-05T18-30-05-000Z-attempt-002-AD-2.log
 ```
 
-Filenames are filesystem-safe on macOS, Linux, and Windows. Each log records the attempt's Availability Domain, instance parameters, and result. Logs never contain private keys, signatures, or other secrets.
+Filenames are filesystem-safe on macOS, Linux, and Windows. Each log records the attempt's Availability Domain, instance parameters, and result — never private keys, signatures, or other secrets.
 
-## Troubleshooting
+</details>
+
+<details>
+<summary><strong>Troubleshooting</strong></summary>
 
 - **`OCI configuration not found`** — the CLI also checks for the Oracle Cloud CLI; if it is missing, install it from <https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm>, then run `oci setup config`, then `bunx oci-free-vm`.
-- **`Authorization failed or requested resource not found` (ListVcns / ListSubnets)** — your OCI login is valid, but the user in `~/.oci/config` is not allowed to list VCNs in the selected compartment, or the compartment OCID is wrong. Cross-check with the official CLI (`oci network vcn list --compartment-id <ocid>`), pick a different compartment, or fix the IAM policy.
+- **`Authorization failed or requested resource not found` (ListVcns / ListSubnets)** — your OCI login is valid, but the user in `~/.oci/config` is not allowed to list VCNs in the selected compartment, or the compartment OCID is wrong. Cross-check with the official CLI (`oci network vcn list --compartment-id <ocid>`), pick a different compartment (the tool re-offers the selection), or fix the IAM policy.
 - **`not retryable` errors** — check the reported reason and the latest file in `oci-free-vm-logs/`.
 - **Instance already exists** — the CLI detects existing instances by name and does nothing.
 - **Non-interactive environments** — use `--json`; every required value must come from CLI flags or the YAML file.
+- **An old version runs despite updates** — `bunx`/`npx` cache packages; run `bun pm cache rm` (or `npm cache clean --force`) to fetch the latest release.
 
-## Development
+</details>
+
+<details>
+<summary><strong>Development</strong></summary>
+
+### Alternative install methods
+
+```bash
+npx oci-free-vm            # run with npm
+npm install -g oci-free-vm  # install globally
+```
+
+### Repository
 
 ```bash
 npm install
@@ -178,4 +171,6 @@ npm run build
 npm test   # node --test (the same suite also runs under `bun test`)
 ```
 
-Releases are published to npm from the `main` branch by pushing a `v*.*.*` tag — see `.github/workflows/publish.yml` (trusted publishing via npm OIDC, no long-lived token).
+Publishing is fully automated: push a `v*.*.*` tag and GitHub Actions runs the full test matrix (Windows/macOS/Linux × Node 22/24, plus a Node 20 dist smoke) and publishes to npm via trusted publishing (OIDC) — no npm tokens in the repo, provenance attestations attached automatically.
+
+</details>
