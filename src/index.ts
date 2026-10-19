@@ -769,90 +769,90 @@ export class Oci {
   }
 
   listVcns(compartmentId: string): Promise<Vcn[]> {
-    return this.request('network', 'GET', 'ListVcns', '/20160916/vcns', {
+    return this.request('network', 'GET', 'ListVcns', '/20160918/vcns', {
       query: { compartmentId },
       schema: z.array(vcnSchema),
     });
   }
 
   listSubnets(compartmentId: string, vcnId: string): Promise<Subnet[]> {
-    return this.request('network', 'GET', 'ListSubnets', '/20160916/subnets', {
+    return this.request('network', 'GET', 'ListSubnets', '/20160918/subnets', {
       query: { compartmentId, vcnId },
       schema: z.array(subnetSchema),
     });
   }
 
   listShapes(compartmentId: string, availabilityDomain: string): Promise<string[]> {
-    return this.request('compute', 'GET', 'ListShapes', '/20160916/shapes', {
+    return this.request('compute', 'GET', 'ListShapes', '/20160918/shapes', {
       query: { compartmentId, availabilityDomain },
       schema: z.array(shapeSchema),
     }).then((shapes) => [...new Set(shapes.map((s) => s.shape))].sort());
   }
 
   listImages(compartmentId: string, shape: string): Promise<Image[]> {
-    return this.request('compute', 'GET', 'ListImages', '/20160916/images', {
+    return this.request('compute', 'GET', 'ListImages', '/20160918/images', {
       query: { compartmentId, operatingSystem: 'Canonical Ubuntu', shape, sortOrder: 'DESC' },
       schema: z.array(imageSchema),
     });
   }
 
   listInstances(compartmentId: string, displayName?: string): Promise<Instance[]> {
-    return this.request('compute', 'GET', 'ListInstances', '/20160916/instances', {
+    return this.request('compute', 'GET', 'ListInstances', '/20160918/instances', {
       query: { compartmentId, displayName },
       schema: z.array(instanceSchema),
     });
   }
 
   listBootVolumes(compartmentId: string, availabilityDomain: string): Promise<z.infer<typeof bootVolumeSchema>[]> {
-    return this.request('compute', 'GET', 'ListBootVolumes', '/20160916/bootVolumes', {
+    return this.request('compute', 'GET', 'ListBootVolumes', '/20160918/bootVolumes', {
       query: { compartmentId, availabilityDomain },
       schema: z.array(bootVolumeSchema),
     });
   }
 
   launchInstance(details: LaunchInstanceDetails): Promise<Instance> {
-    return this.request('compute', 'POST', 'LaunchInstance', '/20160916/instances/', {
+    return this.request('compute', 'POST', 'LaunchInstance', '/20160918/instances/', {
       body: details,
       schema: instanceSchema,
     });
   }
 
   createVcn(args: { compartmentId: string; displayName: string; cidr: string }): Promise<Vcn> {
-    return this.request('network', 'POST', 'CreateVcn', '/20160916/vcns', {
+    return this.request('network', 'POST', 'CreateVcn', '/20160918/vcns', {
       body: { compartmentId: args.compartmentId, displayName: args.displayName, cidrBlocks: [args.cidr] },
       schema: vcnSchema,
     });
   }
 
   createInternetGateway(args: { compartmentId: string; vcnId: string; displayName: string }): Promise<z.infer<typeof idObjectSchema>> {
-    return this.request('network', 'POST', 'CreateInternetGateway', '/20160916/internetGateways', {
+    return this.request('network', 'POST', 'CreateInternetGateway', '/20160918/internetGateways', {
       body: { compartmentId: args.compartmentId, vcnId: args.vcnId, displayName: args.displayName, isEnabled: true },
       schema: idObjectSchema,
     });
   }
 
   updateRouteTable(id: string, routeRules: RouteTable['routeRules']): Promise<RouteTable> {
-    return this.request('network', 'PUT', 'UpdateRouteTable', `/20160916/routeTables/${id}`, {
+    return this.request('network', 'PUT', 'UpdateRouteTable', `/20160918/routeTables/${id}`, {
       body: { routeRules: routeRules ?? [] },
       schema: routeTableSchema,
     });
   }
 
   getSecurityList(id: string): Promise<SecurityList> {
-    return this.request('network', 'GET', 'GetSecurityList', `/20160916/securityLists/${id}`, {
+    return this.request('network', 'GET', 'GetSecurityList', `/20160918/securityLists/${id}`, {
       schema: securityListSchema,
     });
   }
 
   updateSecurityList(id: string, ingress: SecurityList['ingressSecurityRules'], egress: SecurityList['egressSecurityRules']): Promise<SecurityList> {
-    return this.request('network', 'PUT', 'UpdateSecurityList', `/20160916/securityLists/${id}`, {
+    return this.request('network', 'PUT', 'UpdateSecurityList', `/20160918/securityLists/${id}`, {
       body: { ingressSecurityRules: ingress ?? [], egressSecurityRules: egress ?? [] },
       schema: securityListSchema,
     });
   }
 
   createSubnet(args: { compartmentId: string; vcnId: string; displayName: string; cidr: string }): Promise<Subnet> {
-    return this.request('network', 'POST', 'CreateSubnet', '/20160916/subnets', {
+    return this.request('network', 'POST', 'CreateSubnet', '/20160918/subnets', {
       body: {
         compartmentId: args.compartmentId,
         vcnId: args.vcnId,

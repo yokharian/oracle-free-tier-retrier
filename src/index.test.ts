@@ -132,7 +132,7 @@ class MockOci {
         { name: 'fNXZ:US-ASHBURN-AD-3' },
       ]);
     }
-    if (req.method === 'GET' && path === '/20160916/vcns') {
+    if (req.method === 'GET' && path === '/20160918/vcns') {
       return send(200, [
         {
           id: 'ocid1.vcn.oc1..v1',
@@ -142,13 +142,13 @@ class MockOci {
         },
       ]);
     }
-    if (req.method === 'GET' && path === '/20160916/subnets') {
+    if (req.method === 'GET' && path === '/20160918/subnets') {
       return send(200, [{ id: 'ocid1.subnet.oc1..s1', displayName: 'public-subnet', vcnId: 'ocid1.vcn.oc1..v1', availabilityDomain: null }]);
     }
-    if (req.method === 'GET' && path === '/20160916/shapes') {
+    if (req.method === 'GET' && path === '/20160918/shapes') {
       return send(200, [{ shape: 'VM.Standard.A1.Flex' }, { shape: 'VM.Standard.E2.1.Micro' }, { shape: 'VM.Standard.E4.Flex' }]);
     }
-    if (req.method === 'GET' && path === '/20160916/images') {
+    if (req.method === 'GET' && path === '/20160918/images') {
       return send(200, [
         {
           id: 'ocid1.image.oc1..ubuntu2204',
@@ -164,13 +164,13 @@ class MockOci {
         },
       ]);
     }
-    if (req.method === 'GET' && path === '/20160916/instances') {
+    if (req.method === 'GET' && path === '/20160918/instances') {
       const want = url.searchParams.get('displayName');
       const found = want === null ? this.instances : this.instances.filter((instance) => instance.displayName === want);
       return send(200, found);
     }
-    if (req.method === 'GET' && path === '/20160916/bootVolumes') return send(200, this.bootVolumes);
-    if (req.method === 'POST' && path === '/20160916/instances/') {
+    if (req.method === 'GET' && path === '/20160918/bootVolumes') return send(200, this.bootVolumes);
+    if (req.method === 'POST' && path === '/20160918/instances/') {
       const parsed: unknown = JSON.parse(bodyText);
       const displayName =
         parsed !== null && typeof parsed === 'object' && 'displayName' in parsed && typeof parsed.displayName === 'string'
@@ -406,7 +406,7 @@ describe('parseOciConfigText', () => {
 
 describe('buildSignedHeaders', () => {
   it('signs POST bodies verifiably with the OCI v1 header list', () => {
-    const url = new URL('https://iaas.us-ashburn-1.oraclecloud.com/20160916/instances/?compartmentId=ocid1');
+    const url = new URL('https://iaas.us-ashburn-1.oraclecloud.com/20160918/instances/?compartmentId=ocid1');
     const body = '{"displayName":"devbox"}';
     const headers = buildSignedHeaders({ method: 'POST', url, key: KEY_PAIR.privateKey, keyId: 'tenancy/user/fp', body, date: FIXED_DATE });
     const authorization = headers['authorization'] ?? '';
@@ -417,7 +417,7 @@ describe('buildSignedHeaders', () => {
     assert.equal(headers['x-content-sha256'], createHash('sha256').update(body).digest('base64'));
     const signingString = [
       `date: ${FIXED_DATE.toUTCString()}`,
-      '(request-target): post /20160916/instances/?compartmentId=ocid1',
+      '(request-target): post /20160918/instances/?compartmentId=ocid1',
       'host: iaas.us-ashburn-1.oraclecloud.com',
       'content-type: application/json',
       `content-length: ${Buffer.byteLength(body)}`,
