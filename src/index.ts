@@ -178,6 +178,18 @@ function failureAdvice(kind: FailureKind): string {
 
 // ------------------------------------------------------------ secret sanitizing
 
+export function stripNulls(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => stripNulls(item));
+  if (value !== null && typeof value === 'object') {
+    const kept: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      if (entry !== null) kept[key] = stripNulls(entry);
+    }
+    return kept;
+  }
+  return value;
+}
+
 /** Removes PEM blocks and OCI request-signature material from text bound for logs. */
 export function sanitize(text: string): string {
   return text
@@ -846,7 +858,7 @@ export class Oci {
 
   updateSecurityList(id: string, ingress: SecurityList['ingressSecurityRules'], egress: SecurityList['egressSecurityRules']): Promise<SecurityList> {
     return this.request('network', 'PUT', 'UpdateSecurityList', `/20160918/securityLists/${id}`, {
-      body: { ingressSecurityRules: ingress ?? [], egressSecurityRules: egress ?? [] },
+      body: { ingressSecurityRules: stripNulls(ingress ?? []), egressSecurityRules: stripNulls(egress ?? []) },
       schema: securityListSchema,
     });
   }

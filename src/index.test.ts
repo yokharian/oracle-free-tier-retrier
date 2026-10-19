@@ -29,6 +29,7 @@ import {
   sanitize,
   saveYamlConfig,
   shortAd,
+  stripNulls,
   validateDisk,
   validateFlexResources,
   type CliOverrides,
@@ -63,6 +64,7 @@ class MockOci {
   instances: { id: string; displayName: string; lifecycleState: string }[] = [];
   bootVolumes: { displayName: string; sizeInGBs: number }[] = [];
   launchFailures: LaunchFailure[] = [];
+  securityListUpdateBodies: unknown[] = [];
   private readonly server: http.Server;
   readonly url: string;
 
@@ -170,6 +172,33 @@ class MockOci {
       return send(200, found);
     }
     if (req.method === 'GET' && path === '/20160918/bootVolumes') return send(200, this.bootVolumes);
+    if (req.method === 'POST' && path === '/20160918/vcns') {
+      return send(200, { id: 'ocid1.vcn.oc1..created', displayName: 'created-vcn', defaultRouteTableId: 'ocid1.routetable..rt1', defaultSecurityListId: 'ocid1.securitylist..sl1' });
+    }
+    if (req.method === 'POST' && path === '/20160918/internetGateways') {
+      return send(200, { id: 'ocid1.internetgateway..igw1' });
+    }
+    if (req.method === 'PUT' && path === '/20160918/routeTables/ocid1.routetable..rt1') {
+      return send(200, { id: 'ocid1.routetable..rt1', routeRules: [] });
+    }
+    if (req.method === 'GET' && path === '/20160918/securityLists/ocid1.securitylist..sl1') {
+      return send(200, {
+        id: 'ocid1.securitylist..sl1',
+        ingressSecurityRules: [
+          { description: null, icmpOptions: null, isStateless: false, protocol: '6', source: '0.0.0.0/0', sourceType: 'CIDR', tcpOptions: { destinationPortRange: { min: 22, max: 22 } }, udpOptions: null },
+        ],
+        egressSecurityRules: [
+          { description: null, destination: '0.0.0.0/0', destinationType: 'CIDR', icmpOptions: null, isStateless: false, protocol: 'all', tcpOptions: null, udpOptions: null },
+        ],
+      });
+    }
+    if (req.method === 'PUT' && path === '/20160918/securityLists/ocid1.securitylist..sl1') {
+      this.securityListUpdateBodies.push(JSON.parse(bodyText));
+      return send(200, { id: 'ocid1.securitylist..sl1', ingressSecurityRules: [], egressSecurityRules: [] });
+    }
+    if (req.method === 'POST' && path === '/20160918/subnets') {
+      return send(200, { id: 'ocid1.subnet.oc1..created', displayName: 'created-subnet', vcnId: 'ocid1.vcn.oc1..created', availabilityDomain: null });
+    }
     if (req.method === 'POST' && path === '/20160918/instances/') {
       const parsed: unknown = JSON.parse(bodyText);
       const displayName =
@@ -359,6 +388,50 @@ describe('probeBinary', () => {
 describe('appVersion', () => {
   it('reads the version from package.json instead of a hardcoded constant', () => {
     assert.match(appVersion(), /^\d+\.\d+\.\d+$/);
+  });
+});
+
+describe('stripNulls', () => {
+  it('removes null fields recursively', () => {
+    assert.deepEqual(stripNulls({ a: null, b: 1, c: { d: null, e: 2 } }), { b: 1, c: { e: 2 } });
+  });
+});
+
+describe('security list update cleanliness (create mode)', () => {
+  it('sends no null fields in the update payload', async () => {
+    await withOciConfigEnv(async () => {
+      const f = await getFixture();
+      const dir = await mkdtemp(join(tmpdir(), 'oci-free-vm-run-'));
+      const mock = await MockOci.start();
+      try {
+        const code = await run(
+          overrides({
+            jsonMode: true,
+            configPath: join(dir, 'oci-free-vm.yaml'),
+            compartmentId: 'ocid1.compartment.oc1..sandbox',
+            networkMode: 'create',
+            instanceName: 'create-vm',
+            diskGbs: 100,
+            sshKeyFile: f.sshKeyPath,
+            shape: 'VM.Standard.A1.Flex',
+            ocpus: 1,
+            memoryGbs: 6,
+          }),
+          jsonIo(),
+          { endpointOverride: mock.url, logsDir: join(dir, 'logs'), sleep: async () => {}, now: () => FIXED_DATE },
+        );
+        assert.equal(code, 0);
+        const put = mock.securityListUpdateBodies[0];
+        assert.notEqual(put, undefined);
+        const body = JSON.stringify(put);
+        assert.equal(body.includes('null'), false);
+        assert.match(body, /"isStateless":false/);
+        assert.match(body, /"tcpOptions":\{"destinationPortRange":\{"min":22,"max":22\}\}/);
+      } finally {
+        await mock.close();
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
   });
 });
 
