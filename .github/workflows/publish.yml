@@ -23,21 +23,21 @@ jobs:
       - run: npm run build
       - run: npm test
 
-  smoke-node-20:
-    name: dist smoke (node 20)
+  smoke:
+    name: dist smoke (node 24)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
       - run: npm ci
       - run: npm run build
       - run: node dist/index.js --version
 
   publish:
     name: publish to npm
-    needs: [test, smoke-node-20]
+    needs: [test, smoke]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: npm
