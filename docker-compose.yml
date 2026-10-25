@@ -1,0 +1,39 @@
+# oci-free-vm — Docker Compose.
+#
+# Replace every ${...} placeholder below (export the variables in your shell,
+# or put them in a .env file next to docker-compose.yml).
+#
+# Interactive deploy (prompts guide you through everything):
+#   docker compose run --rm oci-free-vm
+#
+# Non-interactive deploy (flags are passed straight to the CLI):
+#   docker compose run --rm oci-free-vm --json --yes --name devbox --disk 250
+#
+# The CLI writes oci-free-vm.yaml and oci-free-vm-logs/ into the mounted work
+# directory, so state and attempt logs survive between runs.
+
+services:
+  oci-free-vm:
+    # Namespace of the image published by .github/workflows/docker.yml.
+    image: docker.io/${DOCKERHUB_USERNAME:?set DOCKERHUB_USERNAME to your Docker Hub user}/oci-free-vm:${OCI_FREE_VM_VERSION:-latest}
+
+    stdin_open: true
+    tty: true
+
+    environment:
+      # OCI API config profile to use from the mounted ~/.oci/config.
+      OCI_CONFIG_PROFILE: ${OCI_CONFIG_PROFILE:-DEFAULT}
+      # QA ONLY — route every OCI API call to a local mock server instead of Oracle:
+      # OCI_FREE_VM_ENDPOINT: http://host.docker.internal:18321
+
+    volumes:
+      # OCI credentials (user, tenancy, fingerprint, region, key_file). Read-only.
+      - ~/.oci:/home/node/.oci:ro
+      # SSH keys. Read-write: the CLI reads an existing public key from here,
+      # or generates a new ed25519 pair when you pick "Generate a new key".
+      - ~/.ssh:/home/node/.ssh
+      # Work directory: oci-free-vm.yaml state + oci-free-vm-logs/ attempts.
+      - .:/home/node/work
+
+    # Example flags for a fully scripted run (see `docker compose run` above).
+    # command: ["--json", "--yes", "--name", "devbox"]

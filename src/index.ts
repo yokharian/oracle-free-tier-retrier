@@ -15,7 +15,7 @@ import * as ociIdentity from 'oci-identity';
 import { APP, DEFAULT_CONFIG_FILE, LOGS_DIR, LIMITS, EXIT, APP_DEFAULTS } from './types.ts';
 import type { Architecture, BootVolume, CliOverrides, Compartment, DeploymentPlan, Failure, Image, Instance, IO, LaunchInstanceDetails, LastErrorOut, NetworkMode, OciAuth, ResolvedConfig, RouteTable, SecurityList, SelectOption, StorageReport, Subnet, Vcn, YamlConfig } from './types.ts';
 import {
-  CancelledError, ConfigError, NetworkError, OciConfigError, OciHttpError, appVersion, assertNever, attemptLogFileName, buildAttemptLog, buildLaunchBody, classifyFailure, detectSshPublicKeyFile, expandTilde, failureAdvice, isFlexShape, loadOciAuth, loadYamlConfig, parseCliArgs, pickUbuntuImage, probeBinary, projectStorage, readSshPublicKey, resolveConfig, sanitize, saveYamlConfig, shortAd, stripNulls, validateDisk, validateFlexResources,
+  CancelledError, ConfigError, NetworkError, OciConfigError, OciHttpError, appVersion, assertNever, attemptLogFileName, buildAttemptLog, buildLaunchBody, classifyFailure, detectSshPublicKeyFile, expandTilde, failureAdvice, generateSshKeyPair, isFlexShape, loadOciAuth, loadYamlConfig, nextSshKeyPath, parseCliArgs, pickUbuntuImage, probeBinary, projectStorage, readSshPublicKey, resolveConfig, sanitize, saveYamlConfig, shortAd, stripNulls, validateDisk, validateFlexResources,
 } from './utils.ts';
 
 export * from './types.ts';
@@ -583,13 +583,7 @@ async function buildPlanInteractive(
   );
 
   const detectedKey = await detectSshPublicKeyFile();
-  const sshKeyFile =
-    resolved.sshKeyFile ??
-    detectedKey ??
-    (await io.text('SSH public key file', {
-      initial: '~/.ssh/id_ed25519.pub',
-      validate: (v) => (v.trim() === '' ? 'required' : undefined),
-    }));
+  const sshKeyFile = resolved.sshKeyFile ?? (await promptSshKeyFile(io, detectedKey));
 
   const assignPublicIp = resolved.assignPublicIp ?? (await io.confirm('Assign a public IP address?', true));
 
@@ -671,6 +665,35 @@ async function buildPlanJson(oci: Oci, auth: OciAuth, resolved: ResolvedConfig):
     intervalSeconds,
     image,
   };
+}
+
+export async function promptSshKeyFile(
+  io: IO,
+  detectedKey: string | null,
+  deps: { keygenAvailable?: boolean | undefined; sshDir?: string | undefined } = {},
+): Promise<string> {
+  const keygenAvailable = deps.keygenAvailable ?? probeBinary('ssh-keygen');
+  const sshDir = deps.sshDir ?? expandTilde('~/.ssh');
+  const options: SelectOption[] = [];
+  if (detectedKey !== null) options.push({ value: 'use-existing', label: 'Use existing key', hint: detectedKey });
+  if (keygenAvailable) options.push({ value: 'generate', label: 'Generate a new ed25519 key pair', hint: join(sshDir, 'id_ed25519') });
+  options.push({ value: 'other', label: 'Enter the path to a public key file' });
+  const choice = await io.select('SSH public key', options, options[0]?.value);
+  if (choice === 'generate') {
+    const privateKeyPath = nextSshKeyPath(sshDir);
+    const publicKeyPath = await generateSshKeyPair(privateKeyPath);
+    io.success(`SSH key pair generated: ${publicKeyPath}`);
+    io.message(`Private key (keep it — you need it to SSH into the instance): ${privateKeyPath}\n`);
+    return publicKeyPath;
+  }
+  if (choice === 'use-existing') {
+    if (detectedKey === null) throw new Error('internal error: "use-existing" selected without a detected key');
+    return detectedKey;
+  }
+  return io.text('SSH public key file', {
+    initial: detectedKey ?? '~/.ssh/id_ed25519.pub',
+    validate: (v) => (v.trim() === '' ? 'required' : undefined),
+  });
 }
 
 

@@ -3,9 +3,9 @@
 import { createPrivateKey } from 'node:crypto';
 import type { KeyObject } from 'node:crypto';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { readFile, writeFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import process from 'node:process';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
@@ -515,6 +515,31 @@ export async function readSshPublicKey(file: string): Promise<string> {
     throw new ConfigError(`${expanded} does not look like an SSH public key file`);
   }
   return trimmed;
+}
+
+export function nextSshKeyPath(sshDir: string): string {
+  const base = join(sshDir, 'id_ed25519');
+  if (!existsSync(base) && !existsSync(`${base}.pub`)) return base;
+  for (let suffix = 1; suffix < 100; suffix += 1) {
+    const candidate = suffix === 1 ? `${base}-oci-free-vm` : `${base}-oci-free-vm-${suffix}`;
+    if (!existsSync(candidate) && !existsSync(`${candidate}.pub`)) return candidate;
+  }
+  throw new ConfigError(`no unused SSH key file name found in ${sshDir}`);
+}
+
+export async function generateSshKeyPair(privateKeyPath: string, comment = 'oci-free-vm'): Promise<string> {
+  await mkdir(dirname(privateKeyPath), { recursive: true });
+  const result = spawnSync('ssh-keygen', ['-t', 'ed25519', '-N', '', '-C', comment, '-f', privateKeyPath, '-q'], {
+    stdio: 'ignore',
+    timeout: 30_000,
+  });
+  if (result.error !== undefined) {
+    throw new ConfigError(`ssh-keygen is not available (${result.error.message}); install OpenSSH or pass --ssh-key <path> with an existing public key`);
+  }
+  if (result.status !== 0) {
+    throw new ConfigError(`ssh-keygen failed with exit code ${result.status ?? 'unknown'}; run it manually: ssh-keygen -t ed25519 -f ${privateKeyPath}`);
+  }
+  return `${privateKeyPath}.pub`;
 }
 
 export function pickUbuntuImage(images: readonly Image[]): Image {

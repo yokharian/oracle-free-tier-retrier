@@ -17,12 +17,15 @@ import {
   buildLaunchBody,
   classifyFailure,
   deployWithRetry,
+  generateSshKeyPair,
   jsonIo,
   loadYamlConfig,
+  nextSshKeyPath,
   parseCliArgs,
   parseOciConfigText,
   probeBinary,
   projectStorage,
+  promptSshKeyFile,
   resolveConfig,
   run,
   sanitize,
@@ -384,6 +387,84 @@ describe('probeBinary', () => {
   it('detects present and absent binaries', () => {
     assert.equal(probeBinary('node'), true);
     assert.equal(probeBinary('oci-free-vm-nonexistent-binary-xyz'), false);
+  });
+});
+
+describe('SSH key generation', () => {
+  it('generates a usable ed25519 pair and refuses to overwrite an existing path', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'oci-free-vm-keygen-'));
+    try {
+      if (probeBinary('ssh-keygen')) {
+        const publicKeyPath = await generateSshKeyPair(join(dir, 'id_ed25519'));
+        assert.match(await readFile(publicKeyPath, 'utf8'), /^ssh-ed25519 AAAA/);
+        assert.equal((await readdir(dir)).includes('id_ed25519'), true);
+        await assert.rejects(() => generateSshKeyPair(join(dir, 'id_ed25519')), ConfigError);
+      } else {
+        await assert.rejects(() => generateSshKeyPair(join(dir, 'id_ed25519')), ConfigError);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('nextSshKeyPath picks the first unused file name', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'oci-free-vm-keypath-'));
+    try {
+      assert.equal(nextSshKeyPath(dir), join(dir, 'id_ed25519'));
+      await writeFile(join(dir, 'id_ed25519'), 'x', 'utf8');
+      assert.equal(nextSshKeyPath(dir), join(dir, 'id_ed25519-oci-free-vm'));
+      await writeFile(join(dir, 'id_ed25519-oci-free-vm.pub'), 'x', 'utf8');
+      assert.equal(nextSshKeyPath(dir), join(dir, 'id_ed25519-oci-free-vm-2'));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('promptSshKeyFile offers generate, use-existing and custom paths', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'oci-free-vm-prompt-'));
+    try {
+      const generated: string[] = [];
+      const generateIo: IO = {
+        ...recordingIo(generated),
+        select: async (_message, options, initial) => {
+          assert.equal(initial, 'generate');
+          assert.equal(options.some((option) => option.value === 'generate'), true);
+          return 'generate';
+        },
+      };
+      const publicKeyPath = await promptSshKeyFile(generateIo, null, { keygenAvailable: true, sshDir: dir });
+      assert.equal(publicKeyPath, join(dir, 'id_ed25519.pub'));
+      assert.match(await readFile(publicKeyPath, 'utf8'), /^ssh-ed25519 AAAA/);
+      assert.equal(generated.join('\n').includes('Private key'), true);
+
+      const existingIo: IO = {
+        ...recordingIo([]),
+        select: async (_message, options, initial) => {
+          assert.equal(initial, 'use-existing');
+          assert.equal(options.some((option) => option.value === 'generate'), true);
+          return 'use-existing';
+        },
+      };
+      assert.equal(await promptSshKeyFile(existingIo, '~/.ssh/id_ed25519.pub', { keygenAvailable: true, sshDir: dir }), '~/.ssh/id_ed25519.pub');
+
+      const customIo: IO = { ...recordingIo([]), select: async () => 'other', text: async () => '/keys/custom.pub' };
+      assert.equal(await promptSshKeyFile(customIo, null, { keygenAvailable: true, sshDir: dir }), '/keys/custom.pub');
+
+      const offered: string[] = [];
+      const noKeygenIo: IO = {
+        ...recordingIo([]),
+        select: async (_message, options, initial) => {
+          for (const option of options) offered.push(option.value);
+          assert.equal(initial, 'other');
+          return 'other';
+        },
+        text: async () => '/keys/custom.pub',
+      };
+      await promptSshKeyFile(noKeygenIo, null, { keygenAvailable: false, sshDir: dir });
+      assert.equal(offered.includes('generate'), false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

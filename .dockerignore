@@ -1,0 +1,11 @@
+# Keep the build context minimal; the runtime stage only needs
+# package.json, package-lock.json, tsconfig.json and src/.
+node_modules
+dist
+.git
+.github
+.idea
+oci-free-vm.yaml
+oci-free-vm-logs
+*.log
+*.pem
