@@ -22,7 +22,7 @@ docker run --rm -it \
   -v ~/.oci:/home/node/.oci:ro \
   -v ~/.ssh:/home/node/.ssh \
   -v "$PWD:/home/node/work" \
-  docker.io/<dockerhub-user>/oci-free-vm:latest
+  ghcr.io/yokharian/oracle-free-tier-retrier:latest
 ```
 
 > Windows PowerShell: write `~` as `${HOME}`, e.g. `-v ${HOME}/.oci:/home/node/.oci:ro`.
@@ -36,7 +36,7 @@ docker run --rm \
   -v ~/.oci:/home/node/.oci:ro \
   -v ~/.ssh:/home/node/.ssh \
   -v "$PWD:/home/node/work" \
-  docker.io/<dockerhub-user>/oci-free-vm:latest \
+  ghcr.io/yokharian/oracle-free-tier-retrier:latest \
   --json --yes \
   --compartment-id ocid1.compartment.oc1..xxx \
   --vcn-id ocid1.vcn.oc1..xxx \
@@ -47,12 +47,18 @@ docker run --rm \
 **With Docker Compose** — see [`docker-compose.yml`](docker-compose.yml); replace its `${...}` values (export them or put them in a `.env` file next to it):
 
 ```bash
-DOCKERHUB_USERNAME=<dockerhub-user> docker compose run --rm oci-free-vm
+docker compose run --rm oci-free-vm
 ```
 
-Replace `<dockerhub-user>` with the Docker Hub namespace the CI publishes to (the `DOCKERHUB_USERNAME` repository secret). Release images are also tagged with their version, e.g. `oci-free-vm:0.5.0`. Prefer building locally? `docker build -t oci-free-vm .` — a multi-stage build on `node:24-alpine` whose runtime layer adds only the bundled CLI (~7 MB).
+The image is published to the GitHub Container Registry as `ghcr.io/yokharian/oracle-free-tier-retrier`. Release images are also tagged with their version, e.g. `ghcr.io/yokharian/oracle-free-tier-retrier:0.5.0`. New GHCR packages are private by default. If a pull is denied, sign in with a GitHub personal access token that has `read:packages`:
 
-The image is published automatically by [`.github/workflows/docker.yml`](.github/workflows/docker.yml): every push to `master` and every `v*.*.*` tag build a multi-arch image (`linux/amd64`, `linux/arm64`) and push it to Docker Hub.
+```bash
+echo "$CR_PAT" | docker login ghcr.io -u <github-user> --password-stdin
+```
+
+Prefer building locally? `docker build -t oci-free-vm .` — a multi-stage build on `node:24-alpine` whose runtime layer adds only the bundled CLI (~7 MB).
+
+The image is published automatically by [`.github/workflows/docker.yml`](.github/workflows/docker.yml): every push to `master` and every `v*.*.*` tag build a multi-arch image (`linux/amd64`, `linux/arm64`) and push it to GHCR. A separate `ghcr` deployment job then pulls the exact published digest and runs `--version` as a smoke test.
 
 ## Run with bunx or npx (alternative)
 
@@ -261,6 +267,6 @@ npm run build
 npm test   # node --test (the same suite also runs under `bun test`)
 ```
 
-Publishing is fully automated in two lanes: pushing a `v*.*.*` tag runs the full npm test matrix (Windows/macOS/Linux × Node 22/24, plus a Node 20 dist smoke) and publishes to npm via trusted publishing (OIDC) — no npm tokens in the repo, provenance attestations attached automatically. The same tags — plus every `master` push — build the multi-arch Docker image (`linux/amd64`, `linux/arm64`) and publish it to Docker Hub via [`.github/workflows/docker.yml`](.github/workflows/docker.yml), authenticating with the `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` repository secrets.
+Publishing is fully automated in two lanes: pushing a `v*.*.*` tag runs the full npm test matrix (Windows/macOS/Linux × Node 22/24, plus a Node 20 dist smoke) and publishes to npm via trusted publishing (OIDC) — no npm tokens in the repo, provenance attestations attached automatically. The same tags — plus every `master` push — build the multi-arch Docker image (`linux/amd64`, `linux/arm64`) and publish it to GHCR via [`.github/workflows/docker.yml`](.github/workflows/docker.yml), authenticating with the automatic `GITHUB_TOKEN` instead of repository secrets.
 
 </details>

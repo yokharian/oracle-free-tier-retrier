@@ -14,8 +14,8 @@
 
 services:
   oci-free-vm:
-    # Namespace of the image published by .github/workflows/docker.yml.
-    image: docker.io/${DOCKERHUB_USERNAME:?set DOCKERHUB_USERNAME to your Docker Hub user}/oci-free-vm:${OCI_FREE_VM_VERSION:-latest}
+    # Image published by .github/workflows/docker.yml.
+    image: ghcr.io/yokharian/oracle-free-tier-retrier:${OCI_FREE_VM_VERSION:-latest}
 
     stdin_open: true
     tty: true
