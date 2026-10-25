@@ -37,7 +37,7 @@
   ],
   "dependencies": {
     "@clack/prompts": "^1.8.1",
-    "oci-common": "^2.143.0",
+    "oci-common": "^2.144.0",
     "oci-core": "^2.143.0",
     "oci-identity": "^2.143.0",
     "picocolors": "^1.1.1",

@@ -34,6 +34,21 @@ function cleanEgressRule(rule: ociCore.models.EgressSecurityRule): ociCore.model
 }
 
 
+type OciServiceError = { statusCode: number; serviceCode: string; message: string };
+
+/**
+ * oci-core and oci-identity pin oci-common to an exact version, so npm can install a second
+ * copy next to ours and the SDK then throws an OciError whose class is not the one we imported.
+ * Match the error shape instead of the class identity so status and service code stay available
+ * for failure classification.
+ */
+function isOciServiceError(error: unknown): error is OciServiceError {
+  if (typeof error !== 'object' || error === null) return false;
+  const candidate = error as { statusCode?: unknown; serviceCode?: unknown; message?: unknown };
+  return typeof candidate.statusCode === 'number' && typeof candidate.serviceCode === 'string' && typeof candidate.message === 'string';
+}
+
+
 export class Oci {
   private readonly auth: OciAuth;
   private readonly identityClient: ociIdentity.IdentityClient;
@@ -70,7 +85,7 @@ export class Oci {
     try {
       return await work();
     } catch (error) {
-      if (error instanceof ociCommon.OciError) {
+      if (isOciServiceError(error)) {
         const code = error.serviceCode === '' ? undefined : error.serviceCode;
         throw new OciHttpError(operation, error.statusCode, code, sanitize(error.message));
       }
