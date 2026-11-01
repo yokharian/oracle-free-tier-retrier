@@ -998,4 +998,45 @@ describe('run in --json mode against a local fake', () => {
       }
     });
   });
+
+  it('verifies all availability domains for capacity when deploying', async () => {
+    await withOciConfigEnv(async () => {
+      const f = await getFixture();
+      const dir = await mkdtemp(join(tmpdir(), 'oci-free-vm-run-'));
+      const mock = await MockOci.start();
+      try {
+        // First two ADs out of capacity, 3rd succeeds
+        mock.launchFailures.push(
+          { status: 500, code: 'InternalError', message: 'Out of host capacity in AD 1' },
+          { status: 500, code: 'InternalError', message: 'Out of host capacity in AD 2' },
+        );
+        const code = await run(
+          overrides({
+            jsonMode: true,
+            configPath: join(dir, 'oci-free-vm.yaml'),
+            compartmentId: 'ocid1.compartment.oc1..sandbox',
+            vcnId: 'ocid1.vcn.oc1..v1',
+            subnetId: 'ocid1.subnet.oc1..s1',
+            instanceName: 'multi-ad-vm',
+            shape: 'VM.Standard.A1.Flex',
+            ocpus: 1,
+            memoryGbs: 6,
+            diskGbs: 100,
+            sshKeyFile: f.sshKeyPath,
+            intervalSeconds: 1,
+          }),
+          jsonIo(),
+          { endpointOverride: mock.url, logsDir: join(dir, 'logs'), sleep: async () => {}, now: () => FIXED_DATE },
+        );
+        assert.equal(code, 0);
+        assert.equal(mock.launchRequests.length, 3);
+        const { data } = await loadYamlConfig(join(dir, 'oci-free-vm.yaml'));
+        assert.equal(data.state?.last_deployment?.status, 'succeeded');
+        assert.equal(data.state?.last_deployment?.availability_domain, 'fNXZ:US-ASHBURN-AD-3');
+      } finally {
+        await mock.close();
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
 });

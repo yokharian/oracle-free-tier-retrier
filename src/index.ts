@@ -439,8 +439,15 @@ function validateInstanceName(name: string): string {
 }
 
 
+async function listShapesForCompartment(oci: Oci, compartmentId: string): Promise<string[]> {
+  const ads = await oci.listAvailabilityDomains(compartmentId);
+  if (ads.length === 0) return [];
+  const shapeSets = await Promise.all(ads.map((ad) => oci.listShapes(compartmentId, ad)));
+  return [...new Set(shapeSets.flat())].sort();
+}
+
 async function resolveImage(oci: Oci, compartmentId: string, architecture: Architecture, shape: string): Promise<Image> {
-  const shapes = await oci.listShapes(compartmentId, (await oci.listAvailabilityDomains(compartmentId))[0] ?? '');
+  const shapes = await listShapesForCompartment(oci, compartmentId);
   if (!shapes.includes(shape)) {
     throw new ConfigError(`shape ${shape} is not available for this compartment (architecture ${architecture})`);
   }
@@ -535,9 +542,8 @@ async function buildPlanInteractive(
   let shape = resolved.shape;
   if (shape === null) {
     const ads = await oci.listAvailabilityDomains(compartmentId);
-    const firstAd = ads[0];
-    if (firstAd === undefined) throw new ConfigError('no Availability Domains found in this compartment');
-    const allShapes = await oci.listShapes(compartmentId, firstAd);
+    if (ads.length === 0) throw new ConfigError('no Availability Domains found in this compartment');
+    const allShapes = await listShapesForCompartment(oci, compartmentId);
     const compatible = shapesForArchitecture(allShapes, architecture);
     if (compatible.length === 0) throw new ConfigError(`no shapes found for architecture ${architecture}`);
     shape = await io.select(
@@ -848,6 +854,8 @@ export interface EngineDeps {
   readonly onCycleFailed: (message: string, code: string) => Promise<void>;
 }
 
+export type AvailabilityDomainSpec = string | { readonly ad: string; readonly subnetId: string };
+
 export async function deployWithRetry(
   ctx: {
     compartmentId: string;
@@ -863,7 +871,7 @@ export async function deployWithRetry(
     architecture: Architecture;
     sshPublicKey: string;
   },
-  availabilityDomains: readonly string[],
+  availabilityDomains: readonly AvailabilityDomainSpec[],
   intervalSeconds: number,
   deps: EngineDeps,
 ): Promise<DeployOutcome> {
@@ -875,8 +883,10 @@ export async function deployWithRetry(
     const existing = await findExistingInstance(deps.oci, ctx.compartmentId, ctx.displayName);
     if (existing !== undefined) return { kind: 'exists', instanceId: existing.id };
 
-    for (const ad of availabilityDomains) {
+    for (const target of availabilityDomains) {
       if (deps.signal?.aborted) return { kind: 'cancelled', logPath: lastLogPath };
+      const ad = typeof target === 'string' ? target : target.ad;
+      const targetSubnetId = typeof target === 'string' ? ctx.subnetId : target.subnetId;
       attempt += 1;
       const timestamp = deps.now().toISOString();
       const logBase = {
@@ -895,7 +905,7 @@ export async function deployWithRetry(
       deps.io.message(`Trying ${shortAd(ad)}...`);
       try {
         const instance = await deps.oci.launchInstance(
-          buildLaunchBody({ ...ctx, availabilityDomain: ad }),
+          buildLaunchBody({ ...ctx, subnetId: targetSubnetId, availabilityDomain: ad }),
         );
         await writeAttemptLog(deps.logsDir, attemptLogFileName(timestamp, attempt, ad), buildAttemptLog({ ...logBase, result: 'SUCCEEDED' }));
         return { kind: 'succeeded', instanceId: instance.id, ad, attempt, logPath: lastLogPath };
@@ -928,7 +938,62 @@ export async function deployWithRetry(
   }
 }
 
-// ------------------------------------------------------------------ yaml output
+async function resolveEngineAds(
+  oci: Oci,
+  compartmentId: string,
+  plan: DeploymentPlan,
+  network: NetworkResult,
+): Promise<{ ad: string; subnetId: string }[]> {
+  const allAds = await oci.listAvailabilityDomains(compartmentId);
+  const subnets =
+    plan.networkMode === 'existing' && network.vcnId !== ''
+      ? await oci.listSubnets(compartmentId, network.vcnId)
+      : [];
+
+  const results: { ad: string; subnetId: string }[] = [];
+
+  for (const ad of allAds) {
+    try {
+      const shapes = await oci.listShapes(compartmentId, ad);
+      if (!shapes.includes(plan.shape)) {
+        continue;
+      }
+    } catch {
+      continue;
+    }
+
+    let subnetId: string | null = null;
+    if (network.created || network.subnetAd === null) {
+      subnetId = network.subnetId;
+    } else if (subnets.length > 0) {
+      const sel = subnets.find((s) => s.id === network.subnetId);
+      if (sel && (sel.availabilityDomain === ad || sel.availabilityDomain === null || sel.availabilityDomain === undefined)) {
+        subnetId = sel.id;
+      } else {
+        const match =
+          subnets.find((s) => s.availabilityDomain === ad) ??
+          subnets.find((s) => s.availabilityDomain === null || s.availabilityDomain === undefined);
+        if (match) {
+          subnetId = match.id;
+        }
+      }
+    } else {
+      subnetId = network.subnetId;
+    }
+
+    if (subnetId !== null) {
+      results.push({ ad, subnetId });
+    }
+  }
+
+  if (results.length === 0) {
+    const fallbackSubnetAd = network.subnetAd;
+    const adsToUse = fallbackSubnetAd === null || fallbackSubnetAd === undefined ? allAds : [fallbackSubnetAd];
+    return adsToUse.map((ad) => ({ ad, subnetId: network.subnetId }));
+  }
+
+  return results;
+}
 
 function buildDefaultsOut(plan: DeploymentPlan, region: string, network: NetworkResult): Record<string, unknown> {
   return {
@@ -998,7 +1063,7 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
     const oci = new Oci(ociAuth, { endpointOverride: deps.endpointOverride });
 
     io.intro(`${APP.name} v${appVersion()}`);
-    plan = cli.jsonMode ? await buildPlanJson(oci, auth, resolved) : await buildPlanInteractive(io, oci, auth, resolved);
+    plan = cli.jsonMode ? await buildPlanJson(oci, ociAuth, resolved) : await buildPlanInteractive(io, oci, ociAuth, resolved);
 
     const allAds = await oci.listAvailabilityDomains(plan.compartmentId);
     const existing = await computeExistingStorage(oci, plan.compartmentId, allAds);
@@ -1022,7 +1087,7 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
     io.step('OCI connection verified');
     const network = await prepareNetwork(oci, plan.compartmentId, plan);
     io.step('Network ready');
-    const engineAds = network.subnetAd === null || network.subnetAd === undefined ? allAds : [network.subnetAd];
+    const engineAds = await resolveEngineAds(oci, plan.compartmentId, plan, network);
     io.step(`Found ${engineAds.length} Availability Domains`);
 
     const outcome = await deployWithRetry(
@@ -1163,7 +1228,7 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
       io.message('Configure OCI first:\n');
       io.message('  oci setup config\n');
       io.message('\nThen run:\n');
-      io.message('    npx oci-free-vm
+      io.message('    npx oci-free-vm\n');
     } else {
       io.error(failure.message);
       io.message(`${failureAdvice(failure.kind)}\n`);
