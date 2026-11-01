@@ -11,7 +11,7 @@ import process from 'node:process';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
 import { LIMITS, EXIT, BOOLEAN_FLAGS, VALUE_FLAGS, yamlConfigSchema } from './types.ts';
-import type { Architecture, CliOverrides, Failure, FailureCode, FailureKind, Image, LaunchInstanceDetails, NetworkMode, OciAuth, ResolvedConfig, StorageReport, YamlConfig, YamlDefaults } from './types.ts';
+import type { Architecture, CliOverrides, Failure, FailureCode, FailureKind, Image, IO, LaunchInstanceDetails, NetworkMode, OciAuth, ResolvedConfig, StorageReport, YamlConfig, YamlDefaults } from './types.ts';
 
 export function assertNever(value: never): never {
   throw new Error(`unhandled variant: ${JSON.stringify(value)}`);
@@ -580,9 +580,9 @@ export async function setupOciConfigInteractive(io: IO): Promise<void> {
   io.message('No OCI configuration found. Let\'s create one.');
   io.message('');
 
-  const user = await io.text('User OCID', { validate: (v) => (v.trim() === '' ? 'required' : undefined) });
-  const tenancy = await io.text('Tenancy OCID', { validate: (v) => (v.trim() === '' ? 'required' : undefined) });
-  const fingerprint = await io.text('API Key Fingerprint', { validate: (v) => (v.trim() === '' ? 'required' : undefined) });
+  const user = await io.text('User OCID', { validate: (v: string) => (v.trim() === '' ? 'required' : undefined) });
+  const tenancy = await io.text('Tenancy OCID', { validate: (v: string) => (v.trim() === '' ? 'required' : undefined) });
+  const fingerprint = await io.text('API Key Fingerprint', { validate: (v: string) => (v.trim() === '' ? 'required' : undefined) });
   const region = await io.select('Region', [
     { value: 'us-ashburn-1', label: 'us-ashburn-1 (US East - Ashburn)' },
     { value: 'us-phoenix-1', label: 'us-phoenix-1 (US West - Phoenix)' },
@@ -645,7 +645,7 @@ export async function setupOciConfigInteractive(io: IO): Promise<void> {
 async function readPrivateKeyFromStdin(): Promise<string> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
-    process.stdin.on('data', (chunk) => chunks.push(chunk));
+    process.stdin.on('data', (chunk: Buffer | string) => chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk));
     process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     process.stdin.resume();
   });
