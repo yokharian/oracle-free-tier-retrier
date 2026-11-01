@@ -15,7 +15,7 @@ import * as ociIdentity from 'oci-identity';
 import { APP, DEFAULT_CONFIG_FILE, LOGS_DIR, LIMITS, EXIT, APP_DEFAULTS } from './types.ts';
 import type { Architecture, BootVolume, CliOverrides, Compartment, DeploymentPlan, Failure, Image, Instance, IO, LaunchInstanceDetails, LastErrorOut, NetworkMode, OciAuth, ResolvedConfig, RouteTable, SecurityList, SelectOption, StorageReport, Subnet, Vcn, YamlConfig } from './types.ts';
 import {
-  CancelledError, ConfigError, NetworkError, OciConfigError, OciHttpError, appVersion, assertNever, attemptLogFileName, buildAttemptLog, buildLaunchBody, classifyFailure, detectSshPublicKeyFile, expandTilde, failureAdvice, generateSshKeyPair, isFlexShape, loadOciAuth, loadYamlConfig, nextSshKeyPath, parseCliArgs, pickUbuntuImage, probeBinary, projectStorage, readSshPublicKey, resolveConfig, sanitize, saveYamlConfig, shortAd, stripNulls, validateDisk, validateFlexResources,
+  CancelledError, ConfigError, NetworkError, OciConfigError, OciHttpError, appVersion, assertNever, attemptLogFileName, buildAttemptLog, buildLaunchBody, classifyFailure, detectSshPublicKeyFile, expandTilde, failureAdvice, generateSshKeyPair, isFlexShape, loadOciAuth, loadYamlConfig, nextSshKeyPath, parseCliArgs, pickUbuntuImage, probeBinary, projectStorage, readSshPublicKey, resolveConfig, sanitize, saveYamlConfig, setupOciConfigInteractive, shortAd, stripNulls, validateDisk, validateFlexResources,
 } from './utils.ts';
 
 export * from './types.ts';
@@ -984,8 +984,18 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
   try {
     loaded = await loadYamlConfig(configPath);
     const resolved = resolveConfig(loaded.data.defaults, cli);
-    const auth = await loadOciAuth(cli.profile);
-    const oci = new Oci(auth, { endpointOverride: deps.endpointOverride });
+    let ociAuth: OciAuth;
+    try {
+      ociAuth = await loadOciAuth(cli.profile);
+    } catch (error) {
+      if (error instanceof OciConfigError && io.interactive) {
+        await setupOciConfigInteractive(io);
+        ociAuth = await loadOciAuth(cli.profile);
+      } else {
+        throw error;
+      }
+    }
+    const oci = new Oci(ociAuth, { endpointOverride: deps.endpointOverride });
 
     io.intro(`${APP.name} v${appVersion()}`);
     plan = cli.jsonMode ? await buildPlanJson(oci, auth, resolved) : await buildPlanInteractive(io, oci, auth, resolved);
@@ -1153,7 +1163,7 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
       io.message('Configure OCI first:\n');
       io.message('  oci setup config\n');
       io.message('\nThen run:\n');
-      io.message('  bunx oci-free-vm\n');
+      io.message('    npx oci-free-vm
     } else {
       io.error(failure.message);
       io.message(`${failureAdvice(failure.kind)}\n`);

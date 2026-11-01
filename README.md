@@ -15,27 +15,25 @@ Nothing to install on your machine besides Docker: no Node, no Bun, no npm.
 1. [Docker](https://docs.docker.com/get-docker/) (Docker Desktop, or `docker` + `docker compose` v2)
 2. OCI credentials in `~/.oci/config` — see [Obtain OCI credentials](#2-obtain-oci-credentials); the Console option needs no other tools
 
-**Interactive deploy** — mount your OCI credentials (read-only), your SSH keys, and a working directory for state:
+**Interactive deploy** — mount your OCI credentials (read-write for app config/logs), your SSH keys:
 
 ```bash
 docker run --rm -it \
-  -v ~/.oci:/home/node/.oci:ro \
+  -v ~/.oci:/home/node/.oci \
   -v ~/.ssh:/home/node/.ssh \
-  -v "$PWD:/home/node/work" \
   ghcr.io/yokharian/oracle-free-tier-retrier:latest
 ```
 
-> Windows PowerShell: write `~` as `${HOME}`, e.g. `-v ${HOME}/.oci:/home/node/.oci:ro`.
+> Windows PowerShell: write `~` as `${HOME}`, e.g. `-v ${HOME}/.oci:/home/node/.oci`.
 
-The CLI writes `oci-free-vm.yaml` (state) and `oci-free-vm-logs/` (attempt logs) into the mounted working directory, so they persist between runs. Don't have an SSH key yet? At the SSH prompt pick **Generate a new ed25519 key pair** — it is created in your mounted `~/.ssh`, and the CLI prints the private key path. Keep that file: it is what you will use to SSH into the instance.
+The CLI reads OCI credentials from `~/.oci/config` and writes its own configuration (`oci-free-vm.yaml`) and attempt logs (`oci-free-vm-logs/`) into the same `~/.oci` directory. Don't have an SSH key yet? At the SSH prompt pick **Generate a new ed25519 key pair** — it is created in your mounted `~/.ssh`, and the CLI prints the private key path. Keep that file: it is what you will use to SSH into the instance.
 
 **Non-interactive deploy** — every required value comes from CLI flags or the YAML file:
 
 ```bash
 docker run --rm \
-  -v ~/.oci:/home/node/.oci:ro \
+  -v ~/.oci:/home/node/.oci \
   -v ~/.ssh:/home/node/.ssh \
-  -v "$PWD:/home/node/work" \
   ghcr.io/yokharian/oracle-free-tier-retrier:latest \
   --json --yes \
   --compartment-id ocid1.compartment.oc1..xxx \
@@ -50,6 +48,8 @@ docker run --rm \
 docker compose run --rm oci-free-vm
 ```
 
+The Compose file mounts `~/.oci` (for OCI credentials + app config/logs) and `~/.ssh` (for SSH keys). No separate work directory mount is needed.
+
 The image is published to the GitHub Container Registry as `ghcr.io/yokharian/oracle-free-tier-retrier`. Release images are also tagged with their version, e.g. `ghcr.io/yokharian/oracle-free-tier-retrier:0.5.0`. New GHCR packages are private by default. If a pull is denied, sign in with a GitHub personal access token that has `read:packages`:
 
 ```bash
@@ -60,11 +60,11 @@ Prefer building locally? `docker build -t oci-free-vm .` — a multi-stage build
 
 The image is published automatically by [`.github/workflows/docker.yml`](.github/workflows/docker.yml): every push to `master` and every `v*.*.*` tag build a multi-arch image (`linux/amd64`, `linux/arm64`) and push it to GHCR. A separate `ghcr` deployment job then pulls the exact published digest and runs `--version` as a smoke test.
 
-## Run with bunx or npx (alternative)
+## Run with npx (alternative)
 
 ### 1. Install the prerequisites
 
-**Node.js ≥ 20** (required for `npx`; `bunx` uses Bun instead):
+**Node.js ≥ 20** (required for `npx`):
 
 - Any OS: official installers — <https://nodejs.org/en/download>
 - macOS: `brew install node`
@@ -75,12 +75,6 @@ The image is published automatically by [`.github/workflows/docker.yml`](.github
   curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash
   nvm install --lts
   ```
-
-**Bun** (optional — `npx oci-free-vm` works with Node alone):
-
-- macOS / Linux: `curl -fsSL https://bun.sh/install | bash`
-- Windows PowerShell: `powershell -c "irm bun.sh/install.ps1 | iex"`
-- Anywhere with npm: `npm install -g bun`
 
 ### 2. Obtain OCI credentials
 
@@ -117,7 +111,7 @@ It generates the key pair, registers the public key with your OCI user, and writ
 ### 3. Deploy
 
 ```bash
-bunx oci-free-vm   # or: npx oci-free-vm
+npx oci-free-vm
 ```
 
 The CLI checks for the OCI CLI and `~/.oci/config` before doing anything else and tells you exactly what is missing.
@@ -239,12 +233,12 @@ Filenames are filesystem-safe on macOS, Linux, and Windows. Each log records the
 <summary><strong>Troubleshooting</strong></summary>
 
 - **Docker: `oci-free-vm needs an interactive terminal`** — add `-it` to `docker run` (or use `docker compose run`, which allocates it), or pass `--json` for non-interactive use.
-- **`OCI configuration not found`** — the CLI also checks for the Oracle Cloud CLI; if it is missing, install it from <https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm>, then run `oci setup config`, then `bunx oci-free-vm`. You can also create the API key from the OCI Console (see [Obtain OCI credentials](#2-obtain-oci-credentials), Option B).
+- **`OCI configuration not found`** — the CLI also checks for the Oracle Cloud CLI; if it is missing, install it from <https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm>, then run `oci setup config`, then `npx oci-free-vm`. You can also create the API key from the OCI Console (see [Obtain OCI credentials](#2-obtain-oci-credentials), Option B).
 - **`Authorization failed or requested resource not found` (ListVcns / ListSubnets)** — your OCI login is valid, but the user in `~/.oci/config` is not allowed to list VCNs in the selected compartment, or the compartment OCID is wrong. Cross-check with the official CLI (`oci network vcn list --compartment-id <ocid>`), pick a different compartment (the tool re-offers the selection), or fix the IAM policy.
 - **`not retryable` errors** — check the reported reason and the latest file in `oci-free-vm-logs/`.
 - **Instance already exists** — the CLI detects existing instances by name and does nothing.
 - **Non-interactive environments** — use `--json`; every required value must come from CLI flags or the YAML file.
-- **An old version runs despite updates** — `bunx`/`npx` cache packages; run `bun pm cache rm` (or `npm cache clean --force`) to fetch the latest release.
+- **An old version runs despite updates** — `npx` caches packages; run `npm cache clean --force` to fetch the latest release.
 
 </details>
 
@@ -264,7 +258,7 @@ npm install -g oci-free-vm  # install globally
 npm install
 npm run typecheck
 npm run build
-npm test   # node --test (the same suite also runs under `bun test`)
+npm test   # node --test
 ```
 
 Publishing is fully automated in two lanes: pushing a `v*.*.*` tag runs the full npm test matrix (Windows/macOS/Linux × Node 22/24, plus a Node 20 dist smoke) and publishes to npm via trusted publishing (OIDC) — no npm tokens in the repo, provenance attestations attached automatically. The same tags — plus every `master` push — build the multi-arch Docker image (`linux/amd64`, `linux/arm64`) and publish it to GHCR via [`.github/workflows/docker.yml`](.github/workflows/docker.yml), authenticating with the automatic `GITHUB_TOKEN` instead of repository secrets.

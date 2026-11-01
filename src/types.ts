@@ -5,8 +5,11 @@ import * as ociCore from 'oci-core';
 import { z } from 'zod';
 
 export const APP = { name: 'oci-free-vm' } as const;
-export const DEFAULT_CONFIG_FILE = 'oci-free-vm.yaml';
-export const LOGS_DIR = 'oci-free-vm-logs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+export const DEFAULT_CONFIG_FILE = join(homedir(), '.oci', 'oci-free-vm.yaml');
+export const LOGS_DIR = join(homedir(), '.oci', 'oci-free-vm-logs');
 
 export const LIMITS = {
   storageWarnGb: 200,

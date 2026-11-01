@@ -573,3 +573,80 @@ export function validateFlexResources(shapeIsFlex: boolean, ocpus: number | null
 }
 
 
+
+// ---------------------------------------------------------- interactive oci setup
+export async function setupOciConfigInteractive(io: IO): Promise<void> {
+  io.intro('OCI Configuration Setup');
+  io.message('No OCI configuration found. Let\'s create one.');
+  io.message('');
+
+  const user = await io.text('User OCID', { validate: (v) => (v.trim() === '' ? 'required' : undefined) });
+  const tenancy = await io.text('Tenancy OCID', { validate: (v) => (v.trim() === '' ? 'required' : undefined) });
+  const fingerprint = await io.text('API Key Fingerprint', { validate: (v) => (v.trim() === '' ? 'required' : undefined) });
+  const region = await io.select('Region', [
+    { value: 'us-ashburn-1', label: 'us-ashburn-1 (US East - Ashburn)' },
+    { value: 'us-phoenix-1', label: 'us-phoenix-1 (US West - Phoenix)' },
+    { value: 'eu-frankfurt-1', label: 'eu-frankfurt-1 (Germany Central - Frankfurt)' },
+    { value: 'uk-london-1', label: 'uk-london-1 (UK South - London)' },
+    { value: 'ap-tokyo-1', label: 'ap-tokyo-1 (Japan East - Tokyo)' },
+    { value: 'ap-sydney-1', label: 'ap-sydney-1 (Australia East - Sydney)' },
+    { value: 'sa-saopaulo-1', label: 'sa-saopaulo-1 (Brazil East - Sao Paulo)' },
+    { value: 'ca-toronto-1', label: 'ca-toronto-1 (Canada Southeast - Toronto)' },
+    { value: 'ap-seoul-1', label: 'ap-seoul-1 (South Korea Central - Seoul)' },
+    { value: 'ap-mumbai-1', label: 'ap-mumbai-1 (India West - Mumbai)' },
+    { value: 'ap-osaka-1', label: 'ap-osaka-1 (Japan Central - Osaka)' },
+    { value: 'eu-zurich-1', label: 'eu-zurich-1 (Switzerland North - Zurich)' },
+    { value: 'eu-madrid-1', label: 'eu-madrid-1 (Spain Central - Madrid)' },
+    { value: 'me-jeddah-1', label: 'me-jeddah-1 (Saudi Arabia West - Jeddah)' },
+    { value: 'me-dubai-1', label: 'me-dubai-1 (UAE East - Dubai)' },
+    { value: 'ap-melbourne-1', label: 'ap-melbourne-1 (Australia Southeast - Melbourne)' },
+    { value: 'ap-hyderabad-1', label: 'ap-hyderabad-1 (India South - Hyderabad)' },
+  ], 'us-ashburn-1');
+
+  const keyFile = join(homedir(), '.oci', 'oci_api_key.pem');
+  const keyDir = dirname(keyFile);
+  await mkdir(keyDir, { recursive: true });
+
+  io.message('');
+  io.message('Private key:');
+  io.message('Paste your PEM-formatted RSA private key (including BEGIN/END lines).');
+  io.message('Press Ctrl+D (or Ctrl+Z on Windows) when done.');
+  io.message('');
+
+  const privateKeyPem = await readPrivateKeyFromStdin();
+
+  if (!privateKeyPem.trim().startsWith('-----BEGIN')) {
+    throw new ConfigError('Private key must be in PEM format (start with -----BEGIN)');
+  }
+
+  try {
+    createPrivateKey(privateKeyPem);
+  } catch {
+    throw new ConfigError('Invalid PEM private key');
+  }
+
+  await writeFile(keyFile, privateKeyPem, { mode: 0o600 });
+
+  const configPath = join(homedir(), '.oci', 'config');
+  const profile = process.env['OCI_CONFIG_PROFILE'] ?? 'DEFAULT';
+  const configContent = '[' + profile + ']\n' +
+    'user=' + user + '\n' +
+    'tenancy=' + tenancy + '\n' +
+    'fingerprint=' + fingerprint + '\n' +
+    'region=' + region + '\n' +
+    'key_file=' + keyFile + '\n';
+  await writeFile(configPath, configContent, { mode: 0o600 });
+
+  io.success('OCI configuration saved to ' + configPath);
+  io.message('Private key saved to ' + keyFile);
+  io.message('');
+}
+
+async function readPrivateKeyFromStdin(): Promise<string> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    process.stdin.on('data', (chunk) => chunks.push(chunk));
+    process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    process.stdin.resume();
+  });
+}

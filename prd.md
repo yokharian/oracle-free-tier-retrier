@@ -12,7 +12,7 @@ The product must be:
 - Account-free.
 - Cross-platform: macOS, Linux, and Windows.
 - Distributed through npm.
-- Executable through both `npx` and `bunx`.
+- Executable through `npx`.
 - Configurable through a single YAML file.
 - Implemented as a single TypeScript source file for the MVP.
 - Published automatically through GitHub Actions.
@@ -44,12 +44,6 @@ The product is not intended to be a general-purpose OCI administration tool.
 > **Deploy an OCI VM and automatically keep trying until capacity is available.**
 
 The basic experience should be:
-
-```bash
-bunx oci-vm
-```
-
-or:
 
 ```bash
 npx oci-vm
@@ -347,7 +341,7 @@ Configure OCI first:
 
 Then run:
 
-  bunx oci-vm
+  npx oci-vm
 ```
 
 The CLI must never persist:
@@ -883,18 +877,10 @@ The single TypeScript file contains:
 The package must be compatible with:
 
 - Node.js;
-- Bun.
-
 Users should be able to run:
 
 ```bash
 npx oci-vm
-```
-
-and:
-
-```bash
-bunx oci-vm
 ```
 
 The package must not require a globally installed CLI.
@@ -1082,12 +1068,6 @@ The same package must work with:
 npx oci-vm
 ```
 
-and:
-
-```bash
-bunx oci-vm
-```
-
 Distribution model:
 
 ```text
@@ -1099,8 +1079,7 @@ GitHub Actions
    ▼
 npm Registry
    │
-   ├── npx oci-vm
-   └── bunx oci-vm
+   └── npx oci-vm
 ```
 
 ---
@@ -1123,16 +1102,10 @@ Installation:
 npx oci-vm
 ```
 
-or:
-
-```bash
-bunx oci-vm
-```
-
 Requirements:
 
 ```text
-- Node.js or Bun
+- Node.js
 - OCI CLI/configuration
 - Permissions to create OCI instances
 ```
@@ -1141,7 +1114,7 @@ Basic setup:
 
 ```bash
 oci setup config
-bunx oci-vm
+npx oci-vm
 ```
 
 Then document:
@@ -1160,12 +1133,12 @@ Then document:
 
 The MVP is complete when a developer can:
 
-1. Install Node.js or Bun.
+1. Install Node.js.
 2. Configure OCI locally.
 3. Run:
 
 ```bash
-bunx oci-vm
+npx oci-vm
 ```
 
 4. Select an existing VCN or create a new one.
@@ -1192,7 +1165,7 @@ bunx oci-vm
 25. Run the CLI on macOS.
 26. Run the CLI on Linux.
 27. Run the CLI on Windows.
-28. Run the package with both `npx` and `bunx`.
+28. Run the package with `npx`.
 29. Publish the package automatically through GitHub Actions.
 30. Never send OCI credentials to an external backend.
 
@@ -1250,7 +1223,7 @@ TypeScript single-file CLI
     ↓
 npm
     ↓
-npx / bunx
+npx
     ↓
 OCI VM deployment
     ↓
