@@ -142,7 +142,7 @@ Values resolve in this order: **CLI arguments > YAML defaults > interactive prom
 | `--disk <gb>` | boot volume size in GB (no arbitrary 200 GB cap) |
 | `--ssh-key <path>` | SSH public key file (default: `~/.ssh/id_ed25519.pub`; the interactive prompt also offers to generate one) |
 | `--public-ip true\|false` | assign a public IP address |
-| `--interval-seconds <n>` | wait between retry cycles (default 900) |
+| `--delay <n>` | retry delay in seconds between AD cycles (default 900; `--interval-seconds` is an alias) |
 | `--network-mode existing\|create` | network mode |
 | `--vcn-id <ocid>`, `--subnet-id <ocid>` | existing network ids |
 

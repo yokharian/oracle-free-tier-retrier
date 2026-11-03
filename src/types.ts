@@ -87,6 +87,7 @@ export const VALUE_FLAGS = new Set([
   'name',
   'ssh-key',
   'public-ip',
+  'delay',
   'interval-seconds',
   'network-mode',
   'vcn-id',

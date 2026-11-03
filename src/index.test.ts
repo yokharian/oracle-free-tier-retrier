@@ -602,6 +602,13 @@ describe('parseCliArgs', () => {
     assert.throws(() => parseCliArgs(['--public-ip', 'maybe']), ConfigError);
     assert.throws(() => parseCliArgs(['--disk', '0']), ConfigError);
   });
+  it('maps --delay to the retry interval and keeps --interval-seconds as an alias', () => {
+    assert.equal(parseCliArgs(['--delay', '900']).intervalSeconds, 900);
+    assert.equal(parseCliArgs(['--interval-seconds', '30']).intervalSeconds, 30);
+    assert.equal(parseCliArgs(['--interval-seconds', '30', '--delay', '900']).intervalSeconds, 900);
+    assert.throws(() => parseCliArgs(['--delay', '0']), ConfigError);
+    assert.throws(() => parseCliArgs(['--delay', 'soon']), ConfigError);
+  });
 });
 
 describe('resolveConfig', () => {
@@ -621,6 +628,10 @@ describe('resolveConfig', () => {
     const resolved = resolveConfig(undefined, parseCliArgs([]));
     assert.equal(resolved.instanceName, null);
     assert.equal(resolved.architecture, null);
+  });
+  it('carries the --delay flag into the resolved retry interval', () => {
+    const resolved = resolveConfig(undefined, parseCliArgs(['--delay', '900']));
+    assert.equal(resolved.intervalSeconds, 900);
   });
 });
 

@@ -262,6 +262,9 @@ export function parseCliArgs(argv: readonly string[]): CliOverrides {
   let networkMode: NetworkMode | undefined;
   if (networkModeValue === 'existing' || networkModeValue === 'create') networkMode = networkModeValue;
   else if (networkModeValue !== undefined) throw new ConfigError(`--network-mode must be "existing" or "create" (got "${networkModeValue}")`);
+  const delay = str('delay');
+  const intervalSeconds =
+    delay !== undefined ? toPositiveInt('delay', delay) : toPositiveInt('interval-seconds', str('interval-seconds'));
   return {
     configPath: nonEmpty('config'),
     profile: nonEmpty('profile'),
@@ -282,7 +285,7 @@ export function parseCliArgs(argv: readonly string[]): CliOverrides {
     instanceName: nonEmpty('name'),
     sshKeyFile: nonEmpty('ssh-key'),
     assignPublicIp,
-    intervalSeconds: toPositiveInt('interval-seconds', str('interval-seconds')),
+    intervalSeconds,
   };
 }
 
