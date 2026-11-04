@@ -27,6 +27,7 @@ import {
   projectStorage,
   promptSshKeyFile,
   resolveConfig,
+  resolveEngineAds,
   run,
   sanitize,
   saveYamlConfig,
@@ -70,6 +71,9 @@ class MockOci {
   bootVolumes: { displayName: string; sizeInGBs: number }[] = [];
   launchFailures: LaunchFailure[] = [];
   securityListUpdateBodies: unknown[] = [];
+  subnets: { id: string; displayName: string; vcnId: string; availabilityDomain: string | null }[] = [
+    { id: 'ocid1.subnet.oc1..s1', displayName: 'public-subnet', vcnId: 'ocid1.vcn.oc1..v1', availabilityDomain: null },
+  ];
   private readonly server: http.Server;
   readonly url: string;
 
@@ -150,7 +154,7 @@ class MockOci {
       ]);
     }
     if (req.method === 'GET' && path === '/20160918/subnets') {
-      return send(200, [{ id: 'ocid1.subnet.oc1..s1', displayName: 'public-subnet', vcnId: 'ocid1.vcn.oc1..v1', availabilityDomain: null }]);
+      return send(200, this.subnets);
     }
     if (req.method === 'GET' && path === '/20160918/shapes') {
       return send(200, [{ shape: 'VM.Standard.A1.Flex' }, { shape: 'VM.Standard.E2.1.Micro' }, { shape: 'VM.Standard.E4.Flex' }]);
@@ -882,6 +886,58 @@ describe('deployWithRetry', () => {
   });
 });
 
+describe('resolveEngineAds', () => {
+  const network = {
+    vcnId: 'ocid1.vcn.oc1..v1',
+    subnetId: 'ocid1.subnet.oc1..s1',
+    vcnName: 'production-vcn',
+    subnetName: 'public-subnet',
+    subnetAd: null as string | null,
+    created: false,
+  };
+
+  it('tries every Availability Domain when the subnet is regional', async () => {
+    const mock = await MockOci.start();
+    try {
+      const oci = new Oci(makeAuth(), { endpointOverride: mock.url });
+      const result = await resolveEngineAds(
+        oci,
+        'ocid1.compartment.oc1..sandbox',
+        { shape: 'VM.Standard.A1.Flex', networkMode: 'existing' },
+        network,
+      );
+      assert.deepEqual(
+        result.targets.map((target) => target.ad),
+        ['fNXZ:US-ASHBURN-AD-3', 'fNXZ:US-ASHBURN-AD-2', 'fNXZ:US-ASHBURN-AD-1'],
+      );
+      assert.deepEqual(result.skipped, []);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  it('reports ADs skipped because no subnet is usable there', async () => {
+    const mock = await MockOci.start();
+    try {
+      mock.subnets = [
+        { id: 'ocid1.subnet.oc1..s1', displayName: 'ad1-only', vcnId: 'ocid1.vcn.oc1..v1', availabilityDomain: 'fNXZ:US-ASHBURN-AD-1' },
+      ];
+      const oci = new Oci(makeAuth(), { endpointOverride: mock.url });
+      const result = await resolveEngineAds(
+        oci,
+        'ocid1.compartment.oc1..sandbox',
+        { shape: 'VM.Standard.A1.Flex', networkMode: 'existing' },
+        { ...network, subnetAd: 'fNXZ:US-ASHBURN-AD-1' },
+      );
+      assert.deepEqual(result.targets.map((target) => target.ad), ['fNXZ:US-ASHBURN-AD-1']);
+      assert.deepEqual(result.skipped.map((entry) => entry.ad), ['fNXZ:US-ASHBURN-AD-2', 'fNXZ:US-ASHBURN-AD-3']);
+      assert.deepEqual(result.skipped.map((entry) => entry.reason), ['no-compatible-subnet', 'no-compatible-subnet']);
+    } finally {
+      await mock.close();
+    }
+  });
+});
+
 describe('run in --json mode against a local fake', () => {
   it('deploys after a capacity failure, persists state, and logs attempts', async () => {
     await withOciConfigEnv(async () => {
@@ -921,6 +977,11 @@ describe('run in --json mode against a local fake', () => {
         assert.equal(data.state?.last_deployment?.instance_name, 'devbox');
         assert.equal(data.defaults?.instance?.disk_gbs, 250);
         assert.equal(data.defaults?.network?.vcn_id, 'ocid1.vcn.oc1..v1');
+        assert.deepEqual(data.state?.availability_domains, [
+          'fNXZ:US-ASHBURN-AD-1',
+          'fNXZ:US-ASHBURN-AD-2',
+          'fNXZ:US-ASHBURN-AD-3',
+        ]);
         const logs = (await readdir(join(dir, 'logs'))).sort();
         assert.equal(logs.length, 2);
         const failedLog = await readFile(join(dir, 'logs', logs[0] ?? ''), 'utf8');
@@ -1010,13 +1071,13 @@ describe('run in --json mode against a local fake', () => {
     });
   });
 
-  it('verifies all availability domains for capacity when deploying', async () => {
+  it('tries Availability Domains from the highest AD number down', async () => {
     await withOciConfigEnv(async () => {
       const f = await getFixture();
       const dir = await mkdtemp(join(tmpdir(), 'oci-free-vm-run-'));
       const mock = await MockOci.start();
       try {
-        // First two ADs out of capacity, 3rd succeeds
+        // Highest AD first: AD-3 and AD-2 are out of capacity, AD-1 succeeds
         mock.launchFailures.push(
           { status: 500, code: 'InternalError', message: 'Out of host capacity in AD 1' },
           { status: 500, code: 'InternalError', message: 'Out of host capacity in AD 2' },
@@ -1043,7 +1104,7 @@ describe('run in --json mode against a local fake', () => {
         assert.equal(mock.launchRequests.length, 3);
         const { data } = await loadYamlConfig(join(dir, 'oci-free-vm.yaml'));
         assert.equal(data.state?.last_deployment?.status, 'succeeded');
-        assert.equal(data.state?.last_deployment?.availability_domain, 'fNXZ:US-ASHBURN-AD-3');
+        assert.equal(data.state?.last_deployment?.availability_domain, 'fNXZ:US-ASHBURN-AD-1');
       } finally {
         await mock.close();
         await rm(dir, { recursive: true, force: true });

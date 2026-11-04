@@ -939,12 +939,42 @@ export async function deployWithRetry(
   }
 }
 
-async function resolveEngineAds(
+type AdSkipReason = 'shape-unavailable' | 'shape-lookup-failed' | 'no-compatible-subnet';
+
+interface SkippedAd {
+  readonly ad: string;
+  readonly reason: AdSkipReason;
+}
+
+function adOrdinal(ad: string): number {
+  const match = /-AD-(\d+)\s*$/i.exec(ad);
+  return match?.[1] === undefined ? 0 : Number(match[1]);
+}
+
+/** Higher-numbered ADs first: AD-3, AD-2, AD-1. Unknown names keep their API order. */
+function sortAdsHighestFirst<T extends { readonly ad: string }>(targets: readonly T[]): T[] {
+  return [...targets].sort((left, right) => adOrdinal(right.ad) - adOrdinal(left.ad));
+}
+
+function describeAdSkip(reason: AdSkipReason, shape: string): string {
+  switch (reason) {
+    case 'shape-unavailable':
+      return `shape ${shape} is not offered there`;
+    case 'shape-lookup-failed':
+      return 'the shape list could not be read there';
+    case 'no-compatible-subnet':
+      return 'no subnet in the VCN is usable in that Availability Domain';
+    default:
+      return assertNever(reason);
+  }
+}
+
+export async function resolveEngineAds(
   oci: Oci,
   compartmentId: string,
-  plan: DeploymentPlan,
+  plan: Pick<DeploymentPlan, 'shape' | 'networkMode'>,
   network: NetworkResult,
-): Promise<{ ad: string; subnetId: string }[]> {
+): Promise<{ targets: { ad: string; subnetId: string }[]; skipped: SkippedAd[] }> {
   const allAds = await oci.listAvailabilityDomains(compartmentId);
   const subnets =
     plan.networkMode === 'existing' && network.vcnId !== ''
@@ -952,14 +982,17 @@ async function resolveEngineAds(
       : [];
 
   const results: { ad: string; subnetId: string }[] = [];
+  const skipped: SkippedAd[] = [];
 
   for (const ad of allAds) {
     try {
       const shapes = await oci.listShapes(compartmentId, ad);
       if (!shapes.includes(plan.shape)) {
+        skipped.push({ ad, reason: 'shape-unavailable' });
         continue;
       }
     } catch {
+      skipped.push({ ad, reason: 'shape-lookup-failed' });
       continue;
     }
 
@@ -984,16 +1017,19 @@ async function resolveEngineAds(
 
     if (subnetId !== null) {
       results.push({ ad, subnetId });
+    } else {
+      skipped.push({ ad, reason: 'no-compatible-subnet' });
     }
   }
 
   if (results.length === 0) {
     const fallbackSubnetAd = network.subnetAd;
     const adsToUse = fallbackSubnetAd === null || fallbackSubnetAd === undefined ? allAds : [fallbackSubnetAd];
-    return adsToUse.map((ad) => ({ ad, subnetId: network.subnetId }));
+    // Fail open: a shape lookup or subnet match is best-effort, so try every AD rather than none.
+    return { targets: sortAdsHighestFirst(adsToUse.map((ad) => ({ ad, subnetId: network.subnetId }))), skipped: [] };
   }
 
-  return results;
+  return { targets: sortAdsHighestFirst(results), skipped };
 }
 
 function buildDefaultsOut(plan: DeploymentPlan, region: string, network: NetworkResult): Record<string, unknown> {
@@ -1067,6 +1103,12 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
     plan = cli.jsonMode ? await buildPlanJson(oci, ociAuth, resolved) : await buildPlanInteractive(io, oci, ociAuth, resolved);
 
     const allAds = await oci.listAvailabilityDomains(plan.compartmentId);
+    const availabilityDomainsState = { ...(loaded.data.state ?? {}), availability_domains: [...allAds] };
+    await saveYamlConfig(configPath, loaded.raw, { state: availabilityDomainsState });
+    loaded = {
+      data: { ...loaded.data, state: availabilityDomainsState },
+      raw: { ...loaded.raw, state: availabilityDomainsState },
+    };
     const existing = await computeExistingStorage(oci, plan.compartmentId, allAds);
     const storage = projectStorage(existing.totalGb, existing.items, plan.diskGbs);
 
@@ -1088,8 +1130,17 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
     io.step('OCI connection verified');
     const network = await prepareNetwork(oci, plan.compartmentId, plan);
     io.step('Network ready');
-    const engineAds = await resolveEngineAds(oci, plan.compartmentId, plan, network);
-    io.step(`Found ${engineAds.length} Availability Domains`);
+    const engine = await resolveEngineAds(oci, plan.compartmentId, plan, network);
+    const engineAds = engine.targets;
+    const adNames = engineAds.map((target) => shortAd(target.ad)).join(', ');
+    io.step(`Using ${engineAds.length} Availability Domain${engineAds.length === 1 ? '' : 's'}${adNames === '' ? '' : ` (${adNames})`}`);
+    for (const entry of engine.skipped) {
+      io.warn(`${shortAd(entry.ad)} skipped: ${describeAdSkip(entry.reason, plan.shape)}`);
+    }
+    const singleAd = allAds[0];
+    if (allAds.length === 1 && singleAd !== undefined) {
+      io.warn(`Region ${plan.region} exposes a single Availability Domain (${shortAd(singleAd)}); capacity retries will repeat there.`);
+    }
 
     const outcome = await deployWithRetry(
       {
@@ -1141,6 +1192,7 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
       case 'succeeded': {
         lastLogPath = outcome.logPath;
         const state = {
+          ...(loaded.data.state ?? {}),
           last_deployment: {
             status: 'succeeded',
             timestamp: now().toISOString(),

@@ -26,4 +26,6 @@ defaults:
     interval_seconds: 900
 
 state: {}
+# state is populated by the CLI: availability_domains lists every AD the region
+# exposes, and last_deployment records the last successful deployment.
 last_error: {}

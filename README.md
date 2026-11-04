@@ -176,6 +176,10 @@ defaults:
     interval_seconds: 900
 
 state:
+  availability_domains:
+    - nwAe:MX-MONTERREY-1-AD-1
+    - nwAe:MX-MONTERREY-1-AD-2
+    - nwAe:MX-MONTERREY-1-AD-3
   last_deployment:
     status: succeeded
     instance_id: ocid1.instance...
@@ -195,7 +199,7 @@ Copy `oci-free-vm.yaml.example` as a starting point, or just run the CLI — the
 
 ## Retry behavior
 
-- All Availability Domains are tried in order on every cycle.
+- All Availability Domains are tried on every cycle, highest-numbered first (AD-3 → AD-2 → AD-1).
 - Capacity errors (`Out of capacity` / `Out of host capacity`), rate limits (429), transient 5xx responses, and network failures are retried automatically; authorization failures, invalid parameters, and other non-retryable errors stop immediately with guidance.
 - An instance-existence check runs before every cycle, so an interrupted or timed-out run never creates a duplicate instance.
 - Cancel at any time with Ctrl+C — no resources are ever deleted, and your last state is preserved in `oci-free-vm.yaml`.
@@ -238,7 +242,8 @@ Filenames are filesystem-safe on macOS, Linux, and Windows. Each log records the
 - **`not retryable` errors** — check the reported reason and the latest file in `oci-free-vm-logs/`.
 - **Instance already exists** — the CLI detects existing instances by name and does nothing.
 - **Non-interactive environments** — use `--json`; every required value must come from CLI flags or the YAML file.
-- **An old version runs despite updates** — `npx` caches packages; run `npm cache clean --force` to fetch the latest release.
+- **Only one Availability Domain is tried** — check what the region exposes with `oci iam availability-domain list --compartment-id <tenancy-ocid> --region <region>`. Some regions (for example `mx-monterrey-1`) have a single AD; an AD that does not exist cannot be tried, so capacity retries repeat in the same one. When an AD is skipped, the CLI now prints the reason (shape unavailable, shape lookup failed, or no compatible subnet).
+- **An old version runs despite updates** — `npx` caches packages; run `npm cache clean --force` to fetch the latest release. If you run a local build, rebuild it with `npm run build`; a stale `dist/` keeps the old behavior even after `src/` changes.
 
 </details>
 

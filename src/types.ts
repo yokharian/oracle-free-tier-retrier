@@ -301,7 +301,12 @@ const lastErrorSchema = z
 export const yamlConfigSchema = z
   .object({
     defaults: defaultsSchema.optional(),
-    state: z.object({ last_deployment: lastDeploymentSchema }).optional(),
+    state: z
+      .object({
+        last_deployment: lastDeploymentSchema,
+        availability_domains: z.array(z.string()).optional(),
+      })
+      .optional(),
     last_error: lastErrorSchema,
   })
   .passthrough();

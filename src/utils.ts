@@ -182,12 +182,17 @@ export async function saveYamlConfig(
   path: string,
   raw: Record<string, unknown>,
   sections: {
-    defaults: Record<string, unknown>;
-    state: Record<string, unknown>;
-    last_error: Record<string, unknown>;
+    defaults?: Record<string, unknown>;
+    state?: Record<string, unknown>;
+    last_error?: Record<string, unknown>;
   },
 ): Promise<void> {
-  const merged: Record<string, unknown> = { ...raw, ...sections };
+  const merged: Record<string, unknown> = {
+    ...raw,
+    ...(sections.defaults === undefined ? {} : { defaults: sections.defaults }),
+    ...(sections.state === undefined ? {} : { state: sections.state }),
+    ...(sections.last_error === undefined ? {} : { last_error: sections.last_error }),
+  };
   await writeFile(path, stringifyYaml(merged), 'utf8');
 }
 
