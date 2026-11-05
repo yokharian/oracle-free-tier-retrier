@@ -1,4 +1,4 @@
-# PRD — OCI VM Deployer CLI
+# PRD — oci-free-vm
 
 ## 1. Objective
 
@@ -9,12 +9,12 @@ The product must be:
 - Local-first.
 - Backend-free.
 - Database-free.
-- Account-free.
+- Account-free: no product account, though OCI credentials are still required.
 - Cross-platform: macOS, Linux, and Windows.
 - Distributed through npm.
 - Executable through `npx`.
 - Configurable through a single YAML file.
-- Implemented as a single TypeScript source file for the MVP.
+- Implemented as a small set of focused TypeScript modules.
 - Published automatically through GitHub Actions.
 - Designed around excellent CLI UX rather than exposing raw OCI SDK operations.
 
@@ -22,7 +22,7 @@ The CLI must keep OCI credentials entirely on the user's machine.
 
 ---
 
-# 2. Target User
+## 2. Target User
 
 Developers who:
 
@@ -39,14 +39,14 @@ The product is not intended to be a general-purpose OCI administration tool.
 
 ---
 
-# 3. Product Value Proposition
+## 3. Product Value Proposition
 
 > **Deploy an OCI VM and automatically keep trying until capacity is available.**
 
 The basic experience should be:
 
 ```bash
-npx oci-vm
+npx oci-free-vm
 ```
 
 The CLI:
@@ -56,15 +56,15 @@ The CLI:
 3. Guides the user through deployment configuration.
 4. Shows a final deployment summary.
 5. Creates the requested infrastructure.
-6. Automatically retries when capacity is unavailable.
+6. Automatically retries when capacity is unavailable, starting at the highest-numbered Availability Domain.
 7. Persists the result locally.
 8. Produces a log for every infrastructure deployment attempt.
 
 ---
 
-# 4. MVP Scope
+## 4. MVP Scope
 
-## Included
+### Included
 
 The MVP supports direct OCI provisioning.
 
@@ -86,8 +86,10 @@ It must support:
 - SSH public key.
 - Instance name.
 - Public IP.
-- Availability Domain discovery.
+- Availability Domain discovery and persistence.
+- Highest-numbered-first Availability Domain retries.
 - Automatic retry.
+- Configurable retry interval (`--delay` / `retry.interval_seconds`).
 - Existing-instance detection.
 - Local execution state.
 - Per-attempt infrastructure logs.
@@ -95,7 +97,7 @@ It must support:
 
 ---
 
-# 5. Networking / VCN UX
+## 5. Networking / VCN UX
 
 Networking must be an explicit step in the deployment flow.
 
@@ -108,7 +110,7 @@ The user must be able to choose:
   Create a new VCN
 ```
 
-## Existing VCN
+### Existing VCN
 
 When selected, query OCI and display available VCNs.
 
@@ -131,7 +133,7 @@ After selecting a VCN, display/select its available subnets.
   private-subnet
 ```
 
-## Create new VCN
+### Create new VCN
 
 The CLI should ask only for the minimum required configuration.
 
@@ -139,7 +141,7 @@ Example:
 
 ```text
 ? VCN name
-› oci-vm-vcn
+› oci-free-vm-vcn
 
 ? VCN CIDR
 › 10.0.0.0/16
@@ -166,7 +168,7 @@ The CLI must never silently create a new VCN when an existing VCN was available 
 
 ---
 
-# 6. CPU Architecture
+## 6. CPU Architecture
 
 The user must explicitly be able to select the desired CPU architecture.
 
@@ -199,7 +201,7 @@ The architecture is a deployment parameter and must be persisted in the YAML sta
 
 ---
 
-# 7. Compute Configuration
+## 7. Compute Configuration
 
 The user must be able to configure:
 
@@ -237,7 +239,7 @@ Example:
 
 ---
 
-# 8. Disk Storage
+## 8. Disk Storage
 
 The user must be able to specify the disk/boot-volume size per instance.
 
@@ -262,7 +264,7 @@ The product should not arbitrarily cap the user at 200 GB.
 
 ---
 
-# 9. Existing Instance Storage Warning
+## 9. Existing Instance Storage Warning
 
 Before deployment, the CLI must inspect existing instances relevant to the selected compartment/configuration and calculate the existing storage allocation when possible.
 
@@ -314,7 +316,7 @@ The CLI must clearly distinguish:
 
 ---
 
-# 10. OCI Authentication
+## 10. OCI Authentication
 
 The CLI must use the user's existing OCI configuration.
 
@@ -330,6 +332,8 @@ OCI authentication
 OCI APIs
 ```
 
+If `~/.oci/config` is absent on an interactive run, the CLI can collect the API key details and write the file, or the user can create it with `oci setup config` / the OCI Console.
+
 If OCI configuration is unavailable:
 
 ```text
@@ -341,7 +345,7 @@ Configure OCI first:
 
 Then run:
 
-  npx oci-vm
+  npx oci-free-vm
 ```
 
 The CLI must never persist:
@@ -353,7 +357,7 @@ The CLI must never persist:
 
 ---
 
-# 11. YAML Configuration File
+## 11. YAML Configuration File
 
 The YAML file is **not a database**.
 
@@ -362,23 +366,24 @@ Its purpose is:
 1. Persist the configuration from the user's most recent CLI execution.
 2. Store successful deployment state.
 3. Store the most recent deployment error.
-4. Allow users to manually provide default values.
+4. Store the discovered Availability Domains.
+5. Allow users to manually provide default values.
 
-Default filename:
+Default location:
 
 ```text
-oci-vm.yaml
+~/.oci/oci-free-vm.yaml
 ```
 
 Optional:
 
 ```bash
-oci-vm --config ./my-config.yaml
+oci-free-vm --config ./my-config.yaml
 ```
 
 ---
 
-# 12. YAML Semantics
+## 12. YAML Semantics
 
 The YAML contains three conceptual sections:
 
@@ -423,10 +428,18 @@ defaults:
     interval_seconds: 900
 
 state:
+  availability_domains:
+    - fNXZ:US-ASHBURN-AD-1
+    - fNXZ:US-ASHBURN-AD-2
+    - fNXZ:US-ASHBURN-AD-3
   last_deployment:
     status: succeeded
     instance_id: ocid1.instance...
-    availability_domain: AD-1
+    instance_name: devbox
+    availability_domain: fNXZ:US-ASHBURN-AD-1
+    architecture: arm64
+    shape: VM.Standard.A1.Flex
+    disk_gbs: 250
     timestamp: "2026-10-05T18:32:00Z"
 
 last_error:
@@ -435,11 +448,11 @@ last_error:
   message: "Out of capacity"
 ```
 
-The exact YAML structure may be simplified during implementation as long as these semantics remain.
+The structure above is the implemented schema: `defaults`, `state`, and `last_error` are the top-level sections.
 
 ---
 
-# 13. YAML Persistence Rules
+## 13. YAML Persistence Rules
 
 After a successful deployment:
 
@@ -452,7 +465,7 @@ Example:
 ✓ Deployment successful
 
 Configuration saved to:
-  ./oci-vm.yaml
+  ~/.oci/oci-free-vm.yaml
 ```
 
 If deployment fails:
@@ -467,7 +480,7 @@ The CLI must not write secrets to it.
 
 ---
 
-# 14. Configuration Precedence
+## 14. Configuration Precedence
 
 Configuration priority:
 
@@ -484,7 +497,7 @@ application defaults
 Example:
 
 ```bash
-oci-vm --name my-vm
+oci-free-vm --name my-vm
 ```
 
 overrides:
@@ -499,7 +512,7 @@ Interactive prompts should only ask for values that remain unresolved.
 
 ---
 
-# 15. Deployment Summary
+## 15. Deployment Summary
 
 Before creating infrastructure, show a complete summary.
 
@@ -544,7 +557,7 @@ The user must explicitly confirm.
 
 ---
 
-# 16. Deployment UX
+## 16. Deployment UX
 
 After confirmation:
 
@@ -554,9 +567,9 @@ Starting deployment...
 ✓ Configuration validated
 ✓ OCI connection verified
 ✓ Network ready
-✓ Found 3 Availability Domains
+✓ Using 3 Availability Domains (AD-3, AD-2, AD-1)
 
-Trying AD-1...
+Trying AD-3...
 ```
 
 On success:
@@ -570,24 +583,26 @@ Deployment successful
   Instance OCID:  ocid1.instance...
   Architecture:   ARM64
   Shape:           VM.Standard.A1.Flex
-  AD:              AD-1
+  AD:              AD-3
 ```
 
 ---
 
-# 17. Retry Engine
+## 17. Retry Engine
 
 Automatic retry is the core feature.
 
 The CLI must:
 
-1. Discover all available Availability Domains.
-2. Attempt deployment.
+1. Discover all available Availability Domains and persist them in `state.availability_domains`.
+2. Attempt deployment, starting at the highest-numbered AD (AD-3 → AD-2 → AD-1).
 3. Detect capacity-related failures.
-4. Try another Availability Domain.
+4. Try the next Availability Domain, reporting any AD that was skipped and why.
 5. Wait between retry cycles.
 6. Check whether the instance already exists.
 7. Continue until success or explicit cancellation.
+
+A region may expose a single Availability Domain (for example `mx-monterrey-1`). The CLI warns once at startup in that case; retries repeat in the same AD because no other AD exists.
 
 Default retry interval:
 
@@ -599,26 +614,26 @@ defaults:
 
 Equivalent to 15 minutes.
 
-The interval must be configurable.
+The interval must be configurable (`--delay`, or `retry.interval_seconds` in the YAML).
 
 ---
 
-# 18. Retry UX
+## 18. Retry UX
 
 Example:
 
 ```text
 Starting deployment...
 
-✓ Found 3 Availability Domains
+✓ Using 3 Availability Domains (AD-3, AD-2, AD-1)
 
-AD-1
+AD-3
 ✗ Out of capacity
 
 AD-2
 ✗ Out of capacity
 
-AD-3
+AD-1
 ✗ Out of capacity
 
 No Availability Domain currently has capacity.
@@ -640,14 +655,14 @@ The MVP does not require cloud-side durable execution.
 
 ---
 
-# 19. Per-Attempt Infrastructure Logs
+## 19. Per-Attempt Infrastructure Logs
 
 Every infrastructure deployment attempt must produce a log file.
 
 Create a local directory:
 
 ```text
-oci-vm-logs/
+~/.oci/oci-free-vm-logs/
 ```
 
 Each attempt receives its own log file.
@@ -655,10 +670,10 @@ Each attempt receives its own log file.
 Example:
 
 ```text
-oci-vm-logs/
-├── 2026-10-05T183000Z-ad-1.log
-├── 2026-10-05T184500Z-ad-2.log
-└── 2026-10-05T190000Z-ad-3.log
+~/.oci/oci-free-vm-logs/
+├── 2026-10-05T18-30-00-000Z-attempt-001-AD-3.log
+├── 2026-10-05T18-45-00-000Z-attempt-002-AD-2.log
+└── 2026-10-05T19-00-00-000Z-attempt-003-AD-1.log
 ```
 
 The log must contain enough information to troubleshoot the infrastructure attempt.
@@ -668,7 +683,7 @@ Example:
 ```text
 Timestamp: 2026-10-05T18:30:00Z
 Attempt: 1
-Availability Domain: AD-1
+Availability Domain: fNXZ:US-ASHBURN-AD-1
 Instance: devbox
 Architecture: ARM64
 Shape: VM.Standard.A1.Flex
@@ -688,7 +703,7 @@ Logs must **never contain private keys, authentication tokens, passwords, or oth
 
 ---
 
-# 20. Log Naming
+## 20. Log Naming
 
 Log filenames must be:
 
@@ -699,7 +714,7 @@ Log filenames must be:
 Recommended format:
 
 ```text
-YYYY-MM-DDTHH-mm-ss-SSSZ-<attempt>.log
+YYYY-MM-DDTHH-mm-ss-SSSZ-attempt-NNN-AD-N.log
 ```
 
 Avoid `:` in filenames because Windows does not allow it.
@@ -707,33 +722,40 @@ Avoid `:` in filenames because Windows does not allow it.
 Example:
 
 ```text
-2026-10-05T18-30-00-000Z-attempt-001.log
+2026-10-05T18-30-00-000Z-attempt-001-AD-3.log
 ```
 
 ---
 
-# 21. Successful Deployment State
+## 21. Successful Deployment State
 
 When deployment succeeds, persist at least:
 
 ```yaml
 state:
+  availability_domains:
+    - fNXZ:US-ASHBURN-AD-1
   last_deployment:
     status: succeeded
     timestamp: "..."
     instance_id: "..."
     instance_name: "..."
-    availability_domain: "..."
+    availability_domain: "fNXZ:US-ASHBURN-AD-1"
     architecture: arm64
-    shape: "..."
+    shape: "VM.Standard.A1.Flex"
     disk_gbs: 250
+    ocpus: 1
+    memory_gbs: 6
+    public_ip: true
+    vcn_id: "ocid1.vcn..."
+    subnet_id: "ocid1.subnet..."
 ```
 
 This lets a subsequent CLI execution understand the last successful deployment.
 
 ---
 
-# 22. Idempotency
+## 22. Idempotency
 
 Before creating an instance, the CLI must check whether the requested instance already exists.
 
@@ -756,7 +778,7 @@ The CLI must avoid accidentally creating duplicate instances after:
 
 ---
 
-# 23. Error Classification
+## 23. Error Classification
 
 At minimum classify:
 
@@ -791,7 +813,7 @@ Check your OCI permissions and configuration.
 
 ---
 
-# 24. Ctrl+C
+## 24. Ctrl+C
 
 Ctrl+C must terminate gracefully.
 
@@ -805,17 +827,17 @@ Deployment stopped.
 No resources were deleted.
 
 Last state saved to:
-  ./oci-vm.yaml
+  ~/.oci/oci-free-vm.yaml
 
 Last attempt log:
-  ./oci-vm-logs/2026-10-05T18-30-00-000Z-attempt-003.log
+  ~/.oci/oci-free-vm-logs/2026-10-05T18-30-00-000Z-attempt-003-AD-1.log
 ```
 
 The CLI must never automatically destroy resources when the user cancels.
 
 ---
 
-# 26. Exit Codes
+## 25. Exit Codes
 
 ```text
 0   Success
@@ -828,59 +850,50 @@ The CLI must never automatically destroy resources when the user cancels.
 
 ---
 
-# 27. Project Structure
+## 26. Project Structure
 
-The MVP must intentionally remain extremely small.
+The source stays small and split by responsibility.
 
 ```text
-oci-vm/
+oracle-free-tier-retrier/
 ├── src/
-│   └── index.ts
-├── oci-vm.yaml
+│   ├── index.ts      # CLI shell: prompts, rendering, argument parsing, entry point
+│   ├── core.ts       # OCI client, planning, networking, retry engine, run orchestration
+│   ├── types.ts      # shared types and YAML schemas
+│   └── utils.ts      # small pure helpers
+├── docs/
+│   ├── configuration.md
+│   ├── cli.md
+│   ├── development.md
+│   └── prd.md
 ├── package.json
 ├── tsconfig.json
 ├── README.md
-└── .github/
-    └── workflows/
-        └── publish.yml
+├── CHANGELOG.md
+└── .github/workflows/
 ```
 
-The application logic must live in:
+`src/index.ts` is the only entry point; the other modules are imported by it or by `core.ts`.
 
-```text
-src/index.ts
-```
+The responsibilities are:
 
-There must be no multi-file application architecture in the MVP.
+- `index.ts` — CLI parsing, prompts, rendering, and the entry point.
+- `core.ts` — OCI client, plan building, networking, retry engine, and run orchestration.
+- `types.ts` — shared types and YAML schemas.
+- `utils.ts` — small pure helpers shared by the CLI and the core.
 
-The single TypeScript file contains:
-
-- CLI parsing;
-- YAML handling;
-- OCI client;
-- authentication;
-- discovery;
-- networking;
-- compute;
-- validation;
-- storage calculation;
-- deployment;
-- retry;
-- logging;
-- terminal UX;
-- JSON output.
+A future refactor will split the four files further so each stays under 250 pure LOC; the public imports will stay stable through re-export barrels.
 
 ---
 
-# 28. Runtime
+## 27. Runtime
 
-The package must be compatible with:
+The package supports Node.js 22.23.4+, 24.22.1+, or 26.12.1+. Those are the first releases of each line patched for CVE-2026-111497 (Brotli decoder). Node 20 is end-of-life and has no patched release. npm treats `engines` as advisory: older versions print `EBADENGINE` but may still run, so the README tells users to upgrade rather than ignore it.
 
-- Node.js;
 Users should be able to run:
 
 ```bash
-npx oci-vm
+npx oci-free-vm
 ```
 
 The package must not require a globally installed CLI.
@@ -888,14 +901,14 @@ The package must not require a globally installed CLI.
 Optional global installation:
 
 ```bash
-npm install -g oci-vm
+npm install -g oci-free-vm
 ```
 
 must also work.
 
 ---
 
-# 29. Platform Support
+## 28. Platform Support
 
 Target platforms:
 
@@ -907,7 +920,8 @@ Target platforms:
 ### Linux
 
 - x64.
-- ARM64 where supported by dependencies.
+- ARM64.
+- Docker images for `linux/amd64` and `linux/arm64`.
 
 ### Windows
 
@@ -923,11 +937,11 @@ Do not depend on:
 - grep;
 - Unix-specific filesystem behavior.
 
-All filesystem operations must use Node/Bun APIs.
+All filesystem operations must use Node APIs.
 
 ---
 
-# 30. Security
+## 29. Security
 
 The application is local-first.
 
@@ -943,8 +957,8 @@ Never persist:
 Never write credentials into:
 
 ```text
-oci-vm.yaml
-oci-vm-logs/
+oci-free-vm.yaml
+oci-free-vm-logs/
 stdout
 stderr
 JSON output
@@ -952,29 +966,29 @@ JSON output
 
 Logs must sanitize OCI API errors if they contain potentially sensitive information.
 
-No telemetry is enabled by default.
+No telemetry is collected or sent.
 
 ---
 
-# 31. Package Metadata
+## 30. Package Metadata
 
 The package should expose:
 
 ```json
 {
-  "name": "oci-vm",
-  "version": "0.1.0",
+  "name": "oci-free-vm",
+  "version": "0.6.0",
   "bin": {
-    "oci-vm": "./dist/index.js"
+    "oci-free-vm": "./dist/index.js"
   }
 }
 ```
 
-The final npm package name must be verified for availability before the first release.
+The package is published as `oci-free-vm`; `0.6.0` is the current release on npm (with provenance) and as the `ghcr.io/yokharian/oracle-free-tier-retrier:0.6.0` image.
 
 ---
 
-# 32. GitHub Repository
+## 31. GitHub Repository
 
 Use a simple GitHub workflow:
 
@@ -983,7 +997,7 @@ feature branch
       ↓
 Pull Request
       ↓
-main
+master
 ```
 
 No GitFlow.
@@ -992,80 +1006,66 @@ The repository is the source of truth.
 
 ---
 
-# 33. GitHub Actions
+## 32. GitHub Actions
 
-Create:
+Create `.github/workflows/publish.yml` and `.github/workflows/docker.yml`.
 
-```text
-.github/workflows/publish.yml
-```
+`publish.yml` must:
 
-The workflow must:
-
-1. Checkout repository.
-2. Install Node.js.
+1. Checkout the repository at the pushed tag.
+2. Install Node.js 22 and 24 for the test matrix.
 3. Install dependencies.
 4. Typecheck.
 5. Build.
-6. Run tests.
-7. Publish to npm.
+6. Run tests, including a Node 24 dist smoke.
+7. Publish to npm via Trusted Publishing (OIDC) with provenance.
 
-Publishing should occur only from the trusted `main` branch through an explicit release/tag process.
+Publishing occurs only from a `v*.*.*` tag pushed to `master`. The same tag — and every `master` push — builds and pushes the multi-arch Docker image (`linux/amd64`, `linux/arm64`) to GHCR via `docker.yml`.
 
-Use npm's supported trusted publishing mechanism where possible instead of a long-lived npm token.
+The current suite contains 43 tests; the local gate is `npm run typecheck && npm run build && npm test`.
 
 ---
 
-# 34. Release Process
+## 33. Release Process
 
-Use Semantic Versioning:
+Use Semantic Versioning. The current release is `0.6.0` (2026-11-04); the live line is `0.x` (ignore the unrelated historical `v1.0.0` tag).
 
-```text
-0.1.0
-0.1.1
-0.2.0
-1.0.0
-```
-
-Initial release:
-
-```text
-0.1.0
-```
-
-The release process should be explicit and reproducible.
-
-Example:
+A release is explicit and reproducible:
 
 ```text
 Developer
    │
    ▼
-git tag v0.1.0
+npm version <version> --no-git-tag-version
    │
    ▼
-GitHub
+commit feature changes + version bump
+   │
+   ▼
+git tag v<version>
+   │
+   ▼
+push master, then push the tag
    │
    ▼
 GitHub Actions
    │
-   ├── test
+   ├── test matrix
    ├── build
-   └── npm publish
+   ├── npm publish
+   └── Docker image → GHCR
 ```
 
 ---
 
-# 35. npm / Bun Distribution
+## 34. npm Distribution
 
-npm is the package registry.
-
-Bun does not require a separate publishing pipeline.
+npm is the package registry. The package is npm-first; Bun is not part of the build or release workflow.
 
 The same package must work with:
 
 ```bash
-npx oci-vm
+npx oci-free-vm
 ```
 
 Distribution model:
@@ -1079,66 +1079,39 @@ GitHub Actions
    ▼
 npm Registry
    │
-   └── npx oci-vm
+   └── npx oci-free-vm
 ```
 
 ---
 
-# 36. README
+## 35. README
 
-The README should be concise.
+The README is the short path into the product, not the reference manual.
 
-Opening:
-
-```text
-# OCI VM Deployer
-
-Deploy an OCI VM and automatically retry when capacity is unavailable.
-```
-
-Installation:
-
-```bash
-npx oci-vm
-```
-
-Requirements:
-
-```text
-- Node.js
-- OCI CLI/configuration
-- Permissions to create OCI instances
-```
-
-Basic setup:
-
-```bash
-oci setup config
-npx oci-vm
-```
-
-Then document:
-
-- VCN selection/creation;
-- architecture selection;
-- disk configuration;
-- YAML defaults/state;
-- retry behavior;
-- logs;
-- troubleshooting.
+- Open with a one-line promise and a short paragraph: scarce free-tier capacity, automatic retries, and credentials that stay local.
+- Make `npx oci-free-vm` the default run method and the first command.
+- Keep exactly one fenced `bash` block per run method. Docker is documented at the end, with a single `docker run` block.
+- Put the benefit-led "Why" section before the deeper behavior notes.
+- Link the reference material instead of inlining it:
+  - `docs/cli.md` — options and exit codes.
+  - `docs/configuration.md` — the YAML file.
+  - `docs/development.md` — build, test, and release.
+  - `docs/prd.md` — this document.
+  - `CHANGELOG.md` — release history.
+- Keep troubleshooting short and practical.
 
 ---
 
-# 37. Acceptance Criteria
+## 36. Acceptance Criteria
 
 The MVP is complete when a developer can:
 
-1. Install Node.js.
+1. Install a supported Node.js (22.23.4+, 24.22.1+, or 26.12.1+).
 2. Configure OCI locally.
 3. Run:
 
 ```bash
-npx oci-vm
+npx oci-free-vm
 ```
 
 4. Select an existing VCN or create a new one.
@@ -1168,10 +1141,15 @@ npx oci-vm
 28. Run the package with `npx`.
 29. Publish the package automatically through GitHub Actions.
 30. Never send OCI credentials to an external backend.
+31. Persist discovered Availability Domains in the YAML state.
+32. Retry from the highest-numbered AD and report why an AD was skipped.
+33. Warn when the region exposes a single AD.
+34. Run the published Docker image on `linux/amd64` and `linux/arm64`.
+35. Keep typecheck, build, and the test suite green before release.
 
 ---
 
-# 38. Explicit Non-Goals
+## 37. Explicit Non-Goals
 
 Do not implement in the MVP:
 
@@ -1190,20 +1168,21 @@ Do not implement in the MVP:
 - Remote execution.
 - Telemetry.
 - Cloud synchronization.
+- Multi-region failover.
 - Daemon/background service.
 
 ---
 
-# 39. Core Product Principle
+## 38. Core Product Principle
 
 > **Boring infrastructure, excellent CLI UX.**
 
 The implementation should remain small enough that a developer can read the entire application source and understand the provisioning flow.
 
-The MVP is intentionally:
+The implementation is intentionally:
 
 ```text
-One TypeScript file
+Focused TypeScript modules
         +
 One YAML file
         +
@@ -1219,7 +1198,7 @@ The product transforms the existing Python provisioning script into a polished d
 ```text
 Python CLI
     ↓
-TypeScript single-file CLI
+TypeScript CLI
     ↓
 npm
     ↓
