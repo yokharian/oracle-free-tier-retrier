@@ -1,21 +1,77 @@
 # oci-free-vm
 
-Deploy an Oracle Cloud (OCI) VM from your terminal — and keep retrying until one is actually available.
+**A free-tier OCI VM, without the console-refresh marathon.**
 
-OCI free-tier capacity is scarce — launch requests frequently fail with *"Out of capacity"*. This tool deploys your VM and, when an Availability Domain is full, automatically moves on to the next one, waiting and retrying until the instance is created or you cancel. Your OCI credentials stay on your machine: no backend, no database, no account.
+Oracle Cloud's Always Free ARM capacity is scarce. Launch requests come back with *"Out of capacity"* for hours or days, and retrying by hand is a chore. `oci-free-vm` is one command that does the waiting: it reads your OCI config, walks through the deploy, and keeps retrying until the VM exists or you stop it.
 
-Works on **Windows** (10+, PowerShell / Windows Terminal), **macOS** (Apple Silicon and Intel), and **Linux** (x64 and ARM64) — natively or through Docker.
+Your credentials stay on your machine. There is no backend and nothing to sign up for. It runs on Windows, macOS, and Linux.
 
-## Run using Docker (recommended)
+## Run it
 
-Nothing to install on your machine besides Docker: no Node, no Bun, no npm.
+```bash
+npx oci-free-vm
+```
 
-**Prerequisites**
+You need **Node.js 22.23.4+, 24.22.1+, or 26.12.1+** — the first releases of each line patched for [CVE-2026-111497](https://nvd.nist.gov/vuln/detail/CVE-2026-111497), a high-severity Brotli decoder flaw. Node 20 is end-of-life with no patched release. npm only warns (`EBADENGINE`), so an older Node may still run the CLI; upgrade instead.
 
-1. [Docker](https://docs.docker.com/get-docker/) (Docker Desktop, or `docker` + `docker compose` v2)
-2. OCI credentials in `~/.oci/config` — see [Obtain OCI credentials](#2-obtain-oci-credentials); the Console option needs no other tools
+That is the whole setup. Answer the prompts, or pass flags — see [CLI options](docs/cli.md) for the non-interactive form.
 
-**Interactive deploy** — mount your OCI credentials (read-write for app config/logs), your SSH keys:
+<details>
+<summary><strong>First time with OCI? Create <code>~/.oci/config</code></strong></summary>
+
+`oci-free-vm` signs requests with an API key. Pick one path:
+
+- **`oci setup config` (recommended).** Install the [Oracle Cloud CLI](https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm), then run `oci setup config`. It generates the key pair, registers it with your user, and writes the config file.
+- **The OCI Console.** Open **My profile → API keys → Add API key**, generate a key pair, download the private key, and paste the configuration snippet into `~/.oci/config`. Oracle's walkthrough: [API signing keys](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/apisigningkey.htm).
+- **`oci session authenticate` is not supported.** Session profiles use tokens; this CLI signs with API keys only.
+
+</details>
+
+## Why oci-free-vm
+
+**Capacity is temporary. The retry is not.** A full Availability Domain is not an error you should have to babysit. The CLI records the attempt, waits, and tries again on a schedule you control.
+
+**It tries every AD the region offers, highest first.** Within each cycle it starts at the highest-numbered AD and works down (AD-3 → AD-2 → AD-1). If an AD is skipped, it tells you why.
+
+**Your credentials stay local.** The CLI reads `~/.oci/config` and signs OCI requests itself. Nothing is sent to a third-party service.
+
+**Interactive or scripted.** Prompts walk through the deploy; `--json --yes` turns the same command into something a script can call.
+
+**Boring where it matters.** It checks for an existing instance by name before every cycle, writes one log per attempt, and exits with meaningful codes.
+
+## How retries work
+
+It reads `~/.oci/config`, asks only for unresolved values, shows a plan, and creates the instance. Before every cycle it checks whether an instance with that name already exists.
+
+- **Order:** AD-3 → AD-2 → AD-1. Skipped ADs are reported with a reason.
+- **Retried:** capacity, rate limits (429), transient 5xx, and network failures. **Not retried:** authorization and invalid configuration.
+- **Single-AD regions:** some regions expose one AD. Retries repeat there; check with `oci iam availability-domain list`.
+- **Stopping:** Ctrl+C deletes nothing, and the last state is saved.
+
+## Configuration
+
+Values resolve as **flags > YAML > prompts > defaults**. The YAML file stores your defaults, discovered ADs, and last error — see [the configuration file](docs/configuration.md). Flags and exit codes live in the [CLI reference](docs/cli.md).
+
+## Logs
+
+Every attempt writes its own file under `~/.oci/oci-free-vm-logs/`. No private keys or signatures are written.
+
+## Troubleshooting
+
+- **`oci-free-vm needs an interactive terminal`** — run it in a terminal (with Docker, add `-it`), or use `--json`.
+- **`OCI configuration not found`** — create `~/.oci/config` with `oci setup config` or the Console path above.
+- **`Authorization failed or requested resource not found`** — check the compartment OCID and the user's IAM policy.
+- **Only one AD is tried** — the region may expose just one. Verify with `oci iam availability-domain list`.
+- **Old behavior** — `npx` caches packages; run `npm cache clean --force`. A local build needs `npm run build`.
+
+## Docs
+
+- [CLI options and exit codes](docs/cli.md)
+- [Configuration file](docs/configuration.md)
+- [Development and releases](docs/development.md)
+- [Changelog](CHANGELOG.md)
+
+## Run it with Docker
 
 ```bash
 docker run --rm -it \
@@ -24,249 +80,10 @@ docker run --rm -it \
   ghcr.io/yokharian/oracle-free-tier-retrier:latest
 ```
 
-> Windows PowerShell: write `~` as `${HOME}`, e.g. `-v ${HOME}/.oci:/home/node/.oci`.
+The mounts matter: `~/.oci` gives the CLI your credentials and a place to keep `oci-free-vm.yaml` and its logs; `~/.ssh` lets it use or generate your key pair. On Windows PowerShell, write `~` as `${HOME}`.
 
-The CLI reads OCI credentials from `~/.oci/config` and writes its own configuration (`oci-free-vm.yaml`) and attempt logs (`oci-free-vm-logs/`) into the same `~/.oci` directory. Don't have an SSH key yet? At the SSH prompt pick **Generate a new ed25519 key pair** — it is created in your mounted `~/.ssh`, and the CLI prints the private key path. Keep that file: it is what you will use to SSH into the instance.
+For scripts, add `--json --yes` and pass `--compartment-id`, `--vcn-id`, `--subnet-id`, `--name`, and `--disk` on that same command. Compose users can run `docker compose run --rm oci-free-vm`. If a pull is denied, sign in with a GitHub token that has `read:packages`; build locally with `docker build -t oci-free-vm .`.
 
-**Non-interactive deploy** — every required value comes from CLI flags or the YAML file:
+## License
 
-```bash
-docker run --rm \
-  -v ~/.oci:/home/node/.oci \
-  -v ~/.ssh:/home/node/.ssh \
-  ghcr.io/yokharian/oracle-free-tier-retrier:latest \
-  --json --yes \
-  --compartment-id ocid1.compartment.oc1..xxx \
-  --vcn-id ocid1.vcn.oc1..xxx \
-  --subnet-id ocid1.subnet.oc1..xxx \
-  --name devbox --disk 250 --ssh-key ~/.ssh/id_ed25519.pub
-```
-
-**With Docker Compose** — see [`docker-compose.yml`](docker-compose.yml); replace its `${...}` values (export them or put them in a `.env` file next to it):
-
-```bash
-docker compose run --rm oci-free-vm
-```
-
-The Compose file mounts `~/.oci` (for OCI credentials + app config/logs) and `~/.ssh` (for SSH keys). No separate work directory mount is needed.
-
-The image is published to the GitHub Container Registry as `ghcr.io/yokharian/oracle-free-tier-retrier`. Release images are also tagged with their version, e.g. `ghcr.io/yokharian/oracle-free-tier-retrier:0.5.0`. New GHCR packages are private by default. If a pull is denied, sign in with a GitHub personal access token that has `read:packages`:
-
-```bash
-echo "$CR_PAT" | docker login ghcr.io -u <github-user> --password-stdin
-```
-
-Prefer building locally? `docker build -t oci-free-vm .` — a multi-stage build on `node:24-alpine` whose runtime layer adds only the bundled CLI (~7 MB).
-
-The image is published automatically by [`.github/workflows/docker.yml`](.github/workflows/docker.yml): every push to `master` and every `v*.*.*` tag build a multi-arch image (`linux/amd64`, `linux/arm64`) and push it to GHCR. A separate `ghcr` deployment job then pulls the exact published digest and runs `--version` as a smoke test.
-
-## Run with npx (alternative)
-
-### 1. Install the prerequisites
-
-**Node.js 22.23.4+, 24.22.1+, or 26.12.1+** (required for `npx`). These are the first releases of each line patched for [CVE-2026-111497](https://nvd.nist.gov/vuln/detail/CVE-2026-111497), a high-severity Brotli decoder flaw that can lead to remote code execution. Node 20 is end-of-life and has no patched release, so it is not supported. npm treats `engines` as advisory: older versions print an `EBADENGINE` warning but may still run the CLI.
-
-- Any OS: official installers — <https://nodejs.org/en/download>
-- macOS: `brew install node`
-- Windows: `winget install OpenJS.NodeJS.LTS`
-- Linux (nvm):
-
-  ```bash
-  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash
-  nvm install --lts
-  ```
-
-### 2. Obtain OCI credentials
-
-oci-free-vm signs OCI API calls with an **API signing key** described in `~/.oci/config`. Pick one of these ways to set that up:
-
-**Option A — `oci setup config` (recommended).** Install the Oracle Cloud CLI — <https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm> — then run:
-
-```bash
-oci setup config
-```
-
-It generates the key pair, registers the public key with your OCI user, and writes `~/.oci/config` for you.
-
-**Option B — Register an API key in the OCI Console (frontend, no CLI needed).**
-
-1. Sign in to <https://cloud.oracle.com>.
-2. Open the profile menu (top right) → **My profile** → **API keys** → **Add API key**.
-3. Choose **Generate a key pair** and download the private key, e.g. to `~/.oci/oci_api_key.pem`.
-4. Copy the configuration snippet the Console shows into `~/.oci/config` (create the file if it does not exist), pointing `key_file` at the downloaded key:
-
-   ```ini
-   [DEFAULT]
-   user=ocid1.user.oc1..xxx
-   fingerprint=xx:xx:...
-   tenancy=ocid1.tenancy.oc1..xxx
-   region=us-ashburn-1
-   key_file=~/.oci/oci_api_key.pem
-   ```
-
-   Reference: <https://docs.oracle.com/en-us/iaas/Content/API/Concepts/apisigningkey.htm>
-
-**Option C — `oci session authenticate`.** This creates a short-lived, token-based profile in `~/.oci/config`. ⚠ oci-free-vm signs requests with API keys only, so token-based profiles are **not supported** here — use Option A or B. (Session auth is still convenient for the `oci` CLI itself.)
-
-### 3. Deploy
-
-```bash
-npx oci-free-vm
-```
-
-The CLI checks for the OCI CLI and `~/.oci/config` before doing anything else and tells you exactly what is missing.
-
-## What happens when you run it
-
-1. Reads your existing OCI configuration — you never paste credentials into the tool.
-2. Guides you through: compartment, networking (use an existing VCN, or have one created with an internet gateway and SSH access), architecture (ARM64 / x86_64), shape, OCPUs, memory, disk size, instance name, SSH public key (use an existing one or let the CLI generate a new ed25519 pair), and public IP.
-3. Warns when projected storage exceeds 200 GB, shows a complete deployment summary, and asks before creating anything.
-4. Creates the instance, cycling through Availability Domains on capacity errors and retrying until success.
-
-## Configuration
-
-Values resolve in this order: **CLI arguments > YAML defaults > interactive prompts > application defaults.** Prompts only ask for what is still unresolved.
-
-| Option | Description |
-| --- | --- |
-| `--config <path>` | configuration file (default: `./oci-free-vm.yaml`) |
-| `--profile <name>` | OCI config profile (default: `DEFAULT`) |
-| `--json` | machine-readable JSON output, non-interactive |
-| `--yes` | skip confirmation prompts |
-| `--name <name>` | instance name |
-| `--region <region>` | OCI region |
-| `--compartment-id <ocid>` | compartment OCID |
-| `--arch arm64\|x86_64` | CPU architecture |
-| `--shape <shape>` | instance shape (e.g. `VM.Standard.A1.Flex`) |
-| `--ocpus <n>`, `--memory <gb>` | OCPUs / memory for flexible shapes |
-| `--disk <gb>` | boot volume size in GB (no arbitrary 200 GB cap) |
-| `--ssh-key <path>` | SSH public key file (default: `~/.ssh/id_ed25519.pub`; the interactive prompt also offers to generate one) |
-| `--public-ip true\|false` | assign a public IP address |
-| `--delay <n>` | retry delay in seconds between AD cycles (default 900; `--interval-seconds` is an alias) |
-| `--network-mode existing\|create` | network mode |
-| `--vcn-id <ocid>`, `--subnet-id <ocid>` | existing network ids |
-
-## The `oci-free-vm.yaml` file
-
-The YAML file next to wherever you run the CLI is **not a database**. It persists three things:
-
-- `defaults` — your most recently used configuration,
-- `state.last_deployment` — the last successful deployment,
-- `last_error` — the most recent deployment error.
-
-```yaml
-defaults:
-  region: us-ashburn-1
-  architecture: arm64
-  compartment_id: ocid1.compartment...
-  network:
-    mode: existing
-    vcn_id: ocid1.vcn...
-    subnet_id: ocid1.subnet...
-  instance:
-    name: devbox
-    shape: VM.Standard.A1.Flex
-    ocpus: 1
-    memory_gbs: 6
-    disk_gbs: 250
-    assign_public_ip: true
-  ssh:
-    public_key_file: ~/.ssh/id_ed25519.pub
-  retry:
-    interval_seconds: 900
-
-state:
-  availability_domains:
-    - nwAe:MX-MONTERREY-1-AD-1
-    - nwAe:MX-MONTERREY-1-AD-2
-    - nwAe:MX-MONTERREY-1-AD-3
-  last_deployment:
-    status: succeeded
-    instance_id: ocid1.instance...
-    instance_name: devbox
-    availability_domain: AD-1
-    architecture: arm64
-    shape: VM.Standard.A1.Flex
-    disk_gbs: 250
-
-last_error:
-  timestamp: "2026-10-05T18:10:00Z"
-  code: OUT_OF_CAPACITY
-  message: "Out of capacity"
-```
-
-Copy `oci-free-vm.yaml.example` as a starting point, or just run the CLI — the file is created after your first run. It stays human-readable and manually editable, and secrets are never written to it. Use `--config <path>` for a different file.
-
-## Retry behavior
-
-- All Availability Domains are tried on every cycle, highest-numbered first (AD-3 → AD-2 → AD-1).
-- Capacity errors (`Out of capacity` / `Out of host capacity`), rate limits (429), transient 5xx responses, and network failures are retried automatically; authorization failures, invalid parameters, and other non-retryable errors stop immediately with guidance.
-- An instance-existence check runs before every cycle, so an interrupted or timed-out run never creates a duplicate instance.
-- Cancel at any time with Ctrl+C — no resources are ever deleted, and your last state is preserved in `oci-free-vm.yaml`.
-
-<details>
-<summary><strong>Exit codes</strong></summary>
-
-| Code | Meaning |
-| --- | --- |
-| 0 | Success |
-| 1 | Deployment failure |
-| 2 | Invalid configuration |
-| 3 | Authentication/authorization failure |
-| 4 | User cancelled |
-| 5 | Unexpected error |
-
-</details>
-
-<details>
-<summary><strong>Attempt logs</strong></summary>
-
-Every infrastructure attempt writes its own log under `oci-free-vm-logs/` in the directory where you launched the CLI:
-
-```text
-oci-free-vm-logs/
-├── 2026-10-05T18-30-00-000Z-attempt-001-AD-1.log
-└── 2026-10-05T18-30-05-000Z-attempt-002-AD-2.log
-```
-
-Filenames are filesystem-safe on macOS, Linux, and Windows. Each log records the attempt's Availability Domain, instance parameters, and result — never private keys, signatures, or other secrets.
-
-</details>
-
-<details>
-<summary><strong>Troubleshooting</strong></summary>
-
-- **Docker: `oci-free-vm needs an interactive terminal`** — add `-it` to `docker run` (or use `docker compose run`, which allocates it), or pass `--json` for non-interactive use.
-- **`OCI configuration not found`** — the CLI also checks for the Oracle Cloud CLI; if it is missing, install it from <https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm>, then run `oci setup config`, then `npx oci-free-vm`. You can also create the API key from the OCI Console (see [Obtain OCI credentials](#2-obtain-oci-credentials), Option B).
-- **`Authorization failed or requested resource not found` (ListVcns / ListSubnets)** — your OCI login is valid, but the user in `~/.oci/config` is not allowed to list VCNs in the selected compartment, or the compartment OCID is wrong. Cross-check with the official CLI (`oci network vcn list --compartment-id <ocid>`), pick a different compartment (the tool re-offers the selection), or fix the IAM policy.
-- **`not retryable` errors** — check the reported reason and the latest file in `oci-free-vm-logs/`.
-- **Instance already exists** — the CLI detects existing instances by name and does nothing.
-- **Non-interactive environments** — use `--json`; every required value must come from CLI flags or the YAML file.
-- **Only one Availability Domain is tried** — check what the region exposes with `oci iam availability-domain list --compartment-id <tenancy-ocid> --region <region>`. Some regions (for example `mx-monterrey-1`) have a single AD; an AD that does not exist cannot be tried, so capacity retries repeat in the same one. When an AD is skipped, the CLI now prints the reason (shape unavailable, shape lookup failed, or no compatible subnet).
-- **`EBADENGINE Unsupported engine` warning** — the installed Node is below the security floor (22.23.4 / 24.22.1 / 26.12.1). npm still runs the CLI, but those older releases contain an unpatched Brotli decoder RCE (CVE-2026-111497). Upgrade Node instead of lowering the requirement; the `engines` range is a security floor, not a packaging quirk.
-- **An old version runs despite updates** — `npx` caches packages; run `npm cache clean --force` to fetch the latest release. If you run a local build, rebuild it with `npm run build`; a stale `dist/` keeps the old behavior even after `src/` changes.
-
-</details>
-
-<details>
-<summary><strong>Development</strong></summary>
-
-### Alternative install methods
-
-```bash
-npx oci-free-vm            # run with npm
-npm install -g oci-free-vm  # install globally
-```
-
-### Repository
-
-```bash
-npm install
-npm run typecheck
-npm run build
-npm test   # node --test
-```
-
-Publishing is fully automated in two lanes: pushing a `v*.*.*` tag runs the full npm test matrix (Windows/macOS/Linux × Node 22/24, plus a Node 20 dist smoke) and publishes to npm via trusted publishing (OIDC) — no npm tokens in the repo, provenance attestations attached automatically. The same tags — plus every `master` push — build the multi-arch Docker image (`linux/amd64`, `linux/arm64`) and publish it to GHCR via [`.github/workflows/docker.yml`](.github/workflows/docker.yml), authenticating with the automatic `GITHUB_TOKEN` instead of repository secrets.
-
-</details>
+MIT.
