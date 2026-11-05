@@ -1,362 +1,26 @@
 #!/usr/bin/env node
-// oci-free-vm — deploy an OCI VM and automatically retry when capacity is unavailable.
-// Entry point and domain logic; shared types live in types.ts, pure helpers in utils.ts.
+// oci-free-vm — CLI shell: terminal I/O, prompts, interactive plan building, the deployment
+// summary, usage text, and the entry point. The deployment engine lives in core.ts;
+// small pure helpers live in utils.ts.
 
-import { mkdir, writeFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { createPrivateKey } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
 import process from 'node:process';
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
-import * as ociCommon from 'oci-common';
-import * as ociCore from 'oci-core';
-import * as ociIdentity from 'oci-identity';
-import { APP, DEFAULT_CONFIG_FILE, LOGS_DIR, LIMITS, EXIT, APP_DEFAULTS } from './types.ts';
-import type { Architecture, BootVolume, CliOverrides, Compartment, DeploymentPlan, Failure, Image, Instance, IO, LaunchInstanceDetails, LastErrorOut, NetworkMode, OciAuth, ResolvedConfig, RouteTable, SecurityList, SelectOption, StorageReport, Subnet, Vcn, YamlConfig } from './types.ts';
-import {
-  CancelledError, ConfigError, NetworkError, OciConfigError, OciHttpError, appVersion, assertNever, attemptLogFileName, buildAttemptLog, buildLaunchBody, classifyFailure, detectSshPublicKeyFile, expandTilde, failureAdvice, generateSshKeyPair, isFlexShape, loadOciAuth, loadYamlConfig, nextSshKeyPath, parseCliArgs, pickUbuntuImage, probeBinary, projectStorage, readSshPublicKey, resolveConfig, sanitize, saveYamlConfig, setupOciConfigInteractive, shortAd, stripNulls, validateDisk, validateFlexResources,
-} from './utils.ts';
+import { APP, EXIT, LIMITS, APP_DEFAULTS, BOOLEAN_FLAGS, VALUE_FLAGS } from './types.ts';
+import type { Architecture, CliOverrides, DeploymentPlan, IO, NetworkMode, OciAuth, ResolvedConfig, SelectOption, StorageReport } from './types.ts';
+import { CancelledError, ConfigError, appVersion, classifyFailure, detectSshPublicKeyFile, expandTilde, generateSshKeyPair, isFlexShape, nextSshKeyPath, probeBinary, readSshPublicKey, shapesForArchitecture, shortAd, validateDisk, validateFlexResources, validateInstanceName, writeJson } from './utils.ts';
+import { listShapesForCompartment, resolveImage, run } from './core.ts';
+import type { Oci } from './core.ts';
 
 export * from './types.ts';
 export * from './utils.ts';
-
-function cleanIngressRule(rule: ociCore.models.IngressSecurityRule): ociCore.models.IngressSecurityRule {
-  const serialized = ociCommon.ObjectSerializer.serialize(rule, 'IngressSecurityRule');
-  const parsed = typeof serialized === 'string' ? JSON.parse(serialized) : serialized;
-  return JSON.parse(JSON.stringify(stripNulls(parsed)));
-}
-
-function cleanEgressRule(rule: ociCore.models.EgressSecurityRule): ociCore.models.EgressSecurityRule {
-  const serialized = ociCommon.ObjectSerializer.serialize(rule, 'EgressSecurityRule');
-  const parsed = typeof serialized === 'string' ? JSON.parse(serialized) : serialized;
-  return JSON.parse(JSON.stringify(stripNulls(parsed)));
-}
-
-
-type OciServiceError = { statusCode: number; serviceCode: string; message: string };
-
-/**
- * oci-core and oci-identity pin oci-common to an exact version, so npm can install a second
- * copy next to ours and the SDK then throws an OciError whose class is not the one we imported.
- * Match the error shape instead of the class identity so status and service code stay available
- * for failure classification.
- */
-function isOciServiceError(error: unknown): error is OciServiceError {
-  if (typeof error !== 'object' || error === null) return false;
-  const candidate = error as { statusCode?: unknown; serviceCode?: unknown; message?: unknown };
-  return typeof candidate.statusCode === 'number' && typeof candidate.serviceCode === 'string' && typeof candidate.message === 'string';
-}
-
-
-export class Oci {
-  private readonly auth: OciAuth;
-  private readonly identityClient: ociIdentity.IdentityClient;
-  private readonly networkClient: ociCore.VirtualNetworkClient;
-  private readonly computeClient: ociCore.ComputeClient;
-  private readonly blockstorageClient: ociCore.BlockstorageClient;
-
-  constructor(
-    auth: OciAuth,
-    deps: { endpointOverride?: string | undefined } = {},
-  ) {
-    this.auth = auth;
-    const provider = new ociCommon.SimpleAuthenticationDetailsProvider(
-      auth.tenancy,
-      auth.user,
-      auth.fingerprint,
-      auth.privateKeyPem,
-      auth.passphrase ?? null,
-      ociCommon.Region.fromRegionId(auth.region),
-    );
-    this.identityClient = new ociIdentity.IdentityClient({ authenticationDetailsProvider: provider });
-    this.networkClient = new ociCore.VirtualNetworkClient({ authenticationDetailsProvider: provider });
-    this.computeClient = new ociCore.ComputeClient({ authenticationDetailsProvider: provider });
-    this.blockstorageClient = new ociCore.BlockstorageClient({ authenticationDetailsProvider: provider });
-    const endpoint = deps.endpointOverride ?? process.env['OCI_FREE_VM_ENDPOINT'];
-    if (endpoint !== undefined) {
-      for (const client of [this.identityClient, this.networkClient, this.computeClient, this.blockstorageClient]) {
-        client.endpoint = endpoint;
-      }
-    }
-  }
-
-  private async call<T>(operation: string, work: () => Promise<T>): Promise<T> {
-    try {
-      return await work();
-    } catch (error) {
-      if (isOciServiceError(error)) {
-        const code = error.serviceCode === '' ? undefined : error.serviceCode;
-        throw new OciHttpError(operation, error.statusCode, code, sanitize(error.message));
-      }
-      if (
-        error instanceof TypeError ||
-        (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) ||
-        (error instanceof Error && 'code' in error && typeof error.code === 'string' && /^E(CONN|TIMEDOUT|NOTFOUND|AI_AGAIN|CONNREFUSED|CONNRESET|HOSTUNREACH)/.test(error.code))
-      ) {
-        throw new NetworkError(`${operation}: ${error instanceof Error ? error.message : String(error)}`);
-      }
-      throw error;
-    }
-  }
-
-  async listCompartments(): Promise<Compartment[]> {
-    return this.call('ListCompartments', async () => {
-      const response = await this.identityClient.listCompartments({
-        compartmentId: this.auth.tenancy,
-        compartmentIdInSubtree: true,
-        accessLevel: ociIdentity.requests.ListCompartmentsRequest.AccessLevel.Accessible,
-        lifecycleState: ociIdentity.models.Compartment.LifecycleState.Active,
-      });
-      return (response.items ?? []).map(
-        (compartment): Compartment => ({
-          id: compartment.id ?? '',
-          name: compartment.name ?? '',
-          lifecycleState: compartment.lifecycleState ?? '',
-        }),
-      );
-    });
-  }
-
-  async listAvailabilityDomains(compartmentId: string): Promise<string[]> {
-    return this.call('ListAvailabilityDomains', async () => {
-      const response = await this.identityClient.listAvailabilityDomains({ compartmentId });
-      return (response.items ?? []).map((ad) => ad.name ?? '');
-    });
-  }
-
-  async listVcns(compartmentId: string): Promise<Vcn[]> {
-    return this.call('ListVcns', async () => {
-      const response = await this.networkClient.listVcns({ compartmentId });
-      return (response.items ?? []).map(
-        (vcn): Vcn => ({
-          id: vcn.id ?? '',
-          displayName: vcn.displayName ?? null,
-          defaultRouteTableId: vcn.defaultRouteTableId ?? undefined,
-          defaultSecurityListId: vcn.defaultSecurityListId ?? undefined,
-        }),
-      );
-    });
-  }
-
-  async listSubnets(compartmentId: string, vcnId: string): Promise<Subnet[]> {
-    return this.call('ListSubnets', async () => {
-      const response = await this.networkClient.listSubnets({ compartmentId, vcnId });
-      return (response.items ?? []).map(
-        (subnet): Subnet => ({
-          id: subnet.id ?? '',
-          displayName: subnet.displayName ?? null,
-          vcnId: subnet.vcnId ?? '',
-          availabilityDomain: subnet.availabilityDomain ?? undefined,
-        }),
-      );
-    });
-  }
-
-  async listShapes(compartmentId: string, availabilityDomain: string): Promise<string[]> {
-    return this.call('ListShapes', async () => {
-      const response = await this.computeClient.listShapes({ compartmentId, availabilityDomain });
-      return [...new Set((response.items ?? []).map((shape) => shape.shape ?? ''))].filter((s) => s !== '').sort();
-    });
-  }
-
-  async listImages(compartmentId: string, shape: string): Promise<Image[]> {
-    return this.call('ListImages', async () => {
-      const response = await this.computeClient.listImages({
-        compartmentId,
-        operatingSystem: 'Canonical Ubuntu',
-        shape,
-        sortOrder: ociCore.requests.ListImagesRequest.SortOrder.Desc,
-      });
-      return (response.items ?? []).map(
-        (image): Image => ({
-          id: image.id ?? '',
-          operatingSystem: image.operatingSystem ?? '',
-          operatingSystemVersion: image.operatingSystemVersion ?? '',
-          timeCreated:
-            image.timeCreated === undefined || image.timeCreated === null
-              ? undefined
-              : image.timeCreated instanceof Date
-                ? image.timeCreated.toISOString()
-                : String(image.timeCreated),
-        }),
-      );
-    });
-  }
-
-  async listInstances(compartmentId: string, displayName?: string): Promise<Instance[]> {
-    return this.call('ListInstances', async () => {
-      const response = await this.computeClient.listInstances({
-        compartmentId,
-        ...(displayName === undefined ? {} : { displayName }),
-      });
-      return (response.items ?? []).map(
-        (instance): Instance => ({
-          id: instance.id ?? '',
-          displayName: instance.displayName ?? null,
-          lifecycleState: instance.lifecycleState ?? '',
-        }),
-      );
-    });
-  }
-
-  async listBootVolumes(compartmentId: string, availabilityDomain: string): Promise<BootVolume[]> {
-    return this.call('ListBootVolumes', async () => {
-      const response = await this.blockstorageClient.listBootVolumes({ compartmentId, availabilityDomain });
-      return (response.items ?? []).map(
-        (volume): BootVolume => ({ displayName: volume.displayName ?? null, sizeInGBs: volume.sizeInGBs ?? null }),
-      );
-    });
-  }
-
-  async launchInstance(details: LaunchInstanceDetails): Promise<Instance> {
-    return this.call('LaunchInstance', async () => {
-      const response = await this.computeClient.launchInstance({
-        launchInstanceDetails: {
-          availabilityDomain: details.availabilityDomain,
-          compartmentId: details.compartmentId,
-          displayName: details.displayName,
-          shape: details.shape,
-          ...(details.shapeConfig === undefined ? {} : { shapeConfig: details.shapeConfig }),
-          sourceDetails: details.sourceDetails,
-          createVnicDetails: details.createVnicDetails,
-          metadata: details.metadata,
-        },
-      });
-      const instance = response.instance;
-      return { id: instance?.id ?? '', displayName: instance?.displayName ?? null, lifecycleState: instance?.lifecycleState ?? '' };
-    });
-  }
-
-  async createVcn(args: { compartmentId: string; displayName: string; cidr: string }): Promise<Vcn> {
-    return this.call('CreateVcn', async () => {
-      const response = await this.networkClient.createVcn({
-        createVcnDetails: {
-          compartmentId: args.compartmentId,
-          displayName: args.displayName,
-          cidrBlocks: [args.cidr],
-        },
-      });
-      const vcn = response.vcn;
-      return {
-        id: vcn?.id ?? '',
-        displayName: vcn?.displayName ?? null,
-        defaultRouteTableId: vcn?.defaultRouteTableId ?? undefined,
-        defaultSecurityListId: vcn?.defaultSecurityListId ?? undefined,
-      };
-    });
-  }
-
-  async createInternetGateway(args: { compartmentId: string; vcnId: string; displayName: string }): Promise<{ readonly id: string }> {
-    return this.call('CreateInternetGateway', async () => {
-      const response = await this.networkClient.createInternetGateway({
-        createInternetGatewayDetails: {
-          compartmentId: args.compartmentId,
-          vcnId: args.vcnId,
-          displayName: args.displayName,
-          isEnabled: true,
-        },
-      });
-      return { id: response.internetGateway?.id ?? '' };
-    });
-  }
-
-  async updateRouteTable(id: string, routeRules: readonly ociCore.models.RouteRule[]): Promise<RouteTable> {
-    return this.call('UpdateRouteTable', async () => {
-      const response = await this.networkClient.updateRouteTable({
-        rtId: id,
-        updateRouteTableDetails: {
-          routeRules: [...routeRules],
-        },
-      });
-      return { id: response.routeTable?.id ?? '', routeRules: response.routeTable?.routeRules ?? [] };
-    });
-  }
-
-  async getSecurityList(id: string): Promise<SecurityList> {
-    return this.call('GetSecurityList', async () => {
-      const response = await this.networkClient.getSecurityList({ securityListId: id });
-      const securityList = response.securityList;
-      return {
-        id: securityList?.id ?? '',
-        ingressSecurityRules: (securityList?.ingressSecurityRules ?? []).map(cleanIngressRule),
-        egressSecurityRules: (securityList?.egressSecurityRules ?? []).map(cleanEgressRule),
-      };
-    });
-  }
-
-  async updateSecurityList(
-    id: string,
-    ingress: readonly ociCore.models.IngressSecurityRule[],
-    egress: readonly ociCore.models.EgressSecurityRule[],
-  ): Promise<SecurityList> {
-    return this.call('UpdateSecurityList', async () => {
-      const response = await this.networkClient.updateSecurityList({
-        securityListId: id,
-        updateSecurityListDetails: {
-          ingressSecurityRules: [...ingress],
-          egressSecurityRules: [...egress],
-        },
-      });
-      const securityList = response.securityList;
-      return {
-        id: securityList?.id ?? '',
-        ingressSecurityRules: securityList?.ingressSecurityRules ?? [],
-        egressSecurityRules: securityList?.egressSecurityRules ?? [],
-      };
-    });
-  }
-
-  async createSubnet(args: { compartmentId: string; vcnId: string; displayName: string; cidr: string }): Promise<Subnet> {
-    return this.call('CreateSubnet', async () => {
-      const response = await this.networkClient.createSubnet({
-        createSubnetDetails: {
-          compartmentId: args.compartmentId,
-          vcnId: args.vcnId,
-          displayName: args.displayName,
-          cidrBlock: args.cidr,
-          prohibitPublicIpOnVnic: false,
-        },
-      });
-      const subnet = response.subnet;
-      return {
-        id: subnet?.id ?? '',
-        displayName: subnet?.displayName ?? null,
-        vcnId: subnet?.vcnId ?? '',
-        availabilityDomain: subnet?.availabilityDomain ?? undefined,
-      };
-    });
-  }
-}
-
-
-async function computeExistingStorage(
-  oci: Oci,
-  compartmentId: string,
-  availabilityDomains: readonly string[],
-): Promise<{ totalGb: number | null; items: { name: string; gb: number }[] }> {
-  try {
-    const items: { name: string; gb: number }[] = [];
-    for (const ad of availabilityDomains) {
-      const volumes = await oci.listBootVolumes(compartmentId, ad);
-      for (const volume of volumes) {
-        items.push({ name: volume.displayName ?? 'boot-volume', gb: volume.sizeInGBs ?? 0 });
-      }
-    }
-    return { totalGb: items.reduce((sum, item) => sum + item.gb, 0), items };
-  } catch {
-    return { totalGb: null, items: [] }; // no-excuse-ok: catch — storage is best-effort (§9 "when possible")
-  }
-}
-
-
-async function writeAttemptLog(dir: string, fileName: string, content: string): Promise<string> {
-  await mkdir(dir, { recursive: true });
-  const path = join(dir, fileName);
-  await writeFile(path, content, 'utf8');
-  return path;
-}
-
+export * from './core.ts';
 
 export function interactiveIo(): IO {
   return {
@@ -417,41 +81,8 @@ export function jsonIo(): IO {
   };
 }
 
-function writeJson(value: unknown): void {
-  process.stdout.write(`${JSON.stringify(value)}\n`);
-}
-
-
-function architectureForShape(shape: string): Architecture {
-  return shape.startsWith('VM.Standard.A1') ? 'arm64' : 'x86_64';
-}
-
-function shapesForArchitecture(shapes: readonly string[], architecture: Architecture): string[] {
-  return shapes.filter((shape) => architectureForShape(shape) === architecture);
-}
-
-
-function validateInstanceName(name: string): string {
-  const trimmed = name.trim();
-  if (trimmed === '') throw new ConfigError('instance name must not be empty');
-  if (trimmed.length > 255) throw new ConfigError('instance name must be at most 255 characters');
-  return trimmed;
-}
-
-
-async function listShapesForCompartment(oci: Oci, compartmentId: string): Promise<string[]> {
-  const ads = await oci.listAvailabilityDomains(compartmentId);
-  if (ads.length === 0) return [];
-  const shapeSets = await Promise.all(ads.map((ad) => oci.listShapes(compartmentId, ad)));
-  return [...new Set(shapeSets.flat())].sort();
-}
-
-async function resolveImage(oci: Oci, compartmentId: string, architecture: Architecture, shape: string): Promise<Image> {
-  const shapes = await listShapesForCompartment(oci, compartmentId);
-  if (!shapes.includes(shape)) {
-    throw new ConfigError(`shape ${shape} is not available for this compartment (architecture ${architecture})`);
-  }
-  return pickUbuntuImage(await oci.listImages(compartmentId, shape));
+function validateRequired(value: string): string | undefined {
+  return value.trim() === '' ? 'required' : undefined;
 }
 
 async function selectArchitecture(io: IO): Promise<Architecture> {
@@ -497,7 +128,7 @@ async function buildPlanInteractive(
     networkMode = choice === 'create' ? 'create' : 'existing';
   }
   if (networkMode === 'create') {
-    const name = await io.text('VCN name', { initial: APP_DEFAULTS.vcnName, validate: (v) => (v.trim() === '' ? 'required' : undefined) });
+    const name = await io.text('VCN name', { initial: APP_DEFAULTS.vcnName, validate: validateRequired });
     const cidr = await io.text('VCN CIDR', { initial: APP_DEFAULTS.vcnCidr });
     const subnetCidr = await io.text('Subnet CIDR', { initial: APP_DEFAULTS.subnetCidr });
     newVcn = { name: name.trim(), cidr: cidr.trim(), subnetCidr: subnetCidr.trim() };
@@ -599,7 +230,7 @@ async function buildPlanInteractive(
     resolved.instanceName ??
       (await io.text('Instance name', {
         initial: APP_DEFAULTS.instanceName,
-        validate: (v) => (v.trim() === '' ? 'required' : undefined),
+        validate: validateRequired,
       })),
   );
 
@@ -638,56 +269,6 @@ async function buildPlanInteractive(
   };
 }
 
-async function buildPlanJson(oci: Oci, auth: OciAuth, resolved: ResolvedConfig): Promise<DeploymentPlan> {
-  if (resolved.compartmentId === null) throw new ConfigError('--json mode requires --compartment-id');
-  const networkMode = resolved.networkMode ?? APP_DEFAULTS.networkMode;
-  const vcnId = resolved.vcnId;
-  const subnetId = resolved.subnetId;
-  const newVcn: { name: string; cidr: string; subnetCidr: string } | null =
-    networkMode === 'create'
-      ? { name: APP_DEFAULTS.vcnName, cidr: APP_DEFAULTS.vcnCidr, subnetCidr: APP_DEFAULTS.subnetCidr }
-      : null;
-  if (networkMode === 'existing') {
-    if (vcnId === null) throw new ConfigError('--json mode requires --vcn-id for network mode "existing"');
-    if (subnetId === null) throw new ConfigError('--json mode requires --subnet-id for network mode "existing"');
-  }
-  const architecture = resolved.architecture ?? APP_DEFAULTS.architecture;
-  const shape = resolved.shape ?? APP_DEFAULTS.shape[architecture];
-  const { ocpus, memoryGbs } = validateFlexResources(isFlexShape(shape), resolved.ocpus ?? APP_DEFAULTS.ocpus, resolved.memoryGbs ?? APP_DEFAULTS.memoryGbs);
-  const diskGbs = validateDisk(resolved.diskGbs ?? APP_DEFAULTS.diskGbs);
-  const instanceName = validateInstanceName(resolved.instanceName ?? APP_DEFAULTS.instanceName);
-  const detected = await detectSshPublicKeyFile();
-  const sshKeyFile = resolved.sshKeyFile ?? detected;
-  if (sshKeyFile === null) throw new ConfigError('--json mode requires --ssh-key when no default SSH public key is detected');
-  const intervalSeconds = resolved.intervalSeconds ?? APP_DEFAULTS.intervalSeconds;
-  const region = resolved.region ?? auth.region;
-  const image = await resolveImage(oci, resolved.compartmentId, architecture, shape);
-  const sshPublicKey = await readSshPublicKey(sshKeyFile);
-  return {
-    region,
-    compartmentId: resolved.compartmentId,
-    compartmentName: null,
-    networkMode,
-    vcnId,
-    vcnName: vcnId,
-    subnetId,
-    subnetName: subnetId,
-    newVcn,
-    architecture,
-    shape,
-    shapeIsFlex: isFlexShape(shape),
-    ocpus,
-    memoryGbs,
-    diskGbs,
-    instanceName,
-    assignPublicIp: resolved.assignPublicIp ?? APP_DEFAULTS.assignPublicIp,
-    sshKeyFile,
-    sshPublicKey,
-    intervalSeconds,
-    image,
-  };
-}
-
 export async function promptSshKeyFile(
   io: IO,
   detectedKey: string | null,
@@ -713,636 +294,8 @@ export async function promptSshKeyFile(
   }
   return io.text('SSH public key file', {
     initial: detectedKey ?? '~/.ssh/id_ed25519.pub',
-    validate: (v) => (v.trim() === '' ? 'required' : undefined),
+    validate: validateRequired,
   });
-}
-
-
-function printUsage(): void {
-  process.stdout.write(
-    [
-      `${APP.name} v${appVersion()} — deploy an OCI VM and automatically retry when capacity is unavailable.`,
-      '',
-      'Usage:',
-      '  oci-free-vm [options]',
-      '',
-      'Options:',
-      '  --config <path>           configuration file (default: ./oci-free-vm.yaml)',
-      '  --profile <name>          OCI config profile (default: DEFAULT)',
-      '  --json                    machine-readable JSON output, non-interactive',
-      '  --yes                     skip confirmation prompts',
-      '  --name <name>             instance name',
-      '  --region <region>         OCI region (default: from ~/.oci/config)',
-      '  --compartment-id <ocid>   compartment OCID',
-      '  --arch <arch>             arm64 | x86_64',
-      '  --shape <shape>           instance shape (e.g. VM.Standard.A1.Flex)',
-      '  --ocpus <n>               OCPUs (flexible shapes)',
-      '  --memory <gb>             memory in GB (flexible shapes)',
-      '  --disk <gb>               boot volume size in GB',
-      '  --ssh-key <path>          SSH public key file (default: ~/.ssh/id_ed25519.pub)',
-      '  --public-ip <bool>         "true" or "false"',
-      '  --delay <n>               retry delay in seconds between AD cycles (default: 900)',
-      '  --interval-seconds <n>    alias for --delay',
-      '  --network-mode <mode>     existing | create',
-      '  --vcn-id <ocid>           existing VCN OCID',
-      '  --subnet-id <ocid>        existing subnet OCID',
-      '  --version                 print version',
-      '  --help                    print this help',
-      '',
-      'Precedence: CLI arguments > YAML defaults > interactive prompts > application defaults.',
-      '',
-    ].join('\n'),
-  );
-}
-
-
-// ------------------------------------------------------------------- networking
-
-interface NetworkResult {
-  readonly vcnId: string;
-  readonly subnetId: string;
-  readonly vcnName: string;
-  readonly subnetName: string;
-  readonly subnetAd: string | null;
-  readonly created: boolean;
-}
-
-async function prepareNetwork(oci: Oci, compartmentId: string, plan: DeploymentPlan): Promise<NetworkResult> {
-  if (plan.networkMode === 'create') {
-    const spec = plan.newVcn ?? { name: APP_DEFAULTS.vcnName, cidr: APP_DEFAULTS.vcnCidr, subnetCidr: APP_DEFAULTS.subnetCidr };
-    const vcn = await oci.createVcn({ compartmentId, displayName: spec.name, cidr: spec.cidr });
-    const gateway = await oci.createInternetGateway({ compartmentId, vcnId: vcn.id, displayName: `${spec.name}-igw` });
-    if (vcn.defaultRouteTableId !== null && vcn.defaultRouteTableId !== undefined) {
-      await oci.updateRouteTable(vcn.defaultRouteTableId, [
-        {
-          destination: '0.0.0.0/0',
-          destinationType: ociCore.models.RouteRule.DestinationType.CidrBlock,
-          networkEntityId: gateway.id,
-          routeType: ociCore.models.RouteRule.RouteType.Static,
-        },
-      ]);
-    }
-    if (vcn.defaultSecurityListId !== null && vcn.defaultSecurityListId !== undefined) {
-      const securityList = await oci.getSecurityList(vcn.defaultSecurityListId);
-      const sshRule: ociCore.models.IngressSecurityRule = {
-        source: '0.0.0.0/0',
-        sourceType: ociCore.models.IngressSecurityRule.SourceType.CidrBlock,
-        protocol: '6',
-        isStateless: false,
-        tcpOptions: { destinationPortRange: { min: 22, max: 22 }, sourcePortRange: { min: 1, max: 65535 } },
-      };
-      await oci.updateSecurityList(
-        vcn.defaultSecurityListId,
-        [...(securityList.ingressSecurityRules ?? []), sshRule],
-        securityList.egressSecurityRules ?? [],
-      );
-    }
-    const subnetName = `${spec.name}-subnet`;
-    const subnet = await oci.createSubnet({ compartmentId, vcnId: vcn.id, displayName: subnetName, cidr: spec.subnetCidr });
-    return { vcnId: vcn.id, subnetId: subnet.id, vcnName: spec.name, subnetName, subnetAd: subnet.availabilityDomain ?? null, created: true };
-  }
-  const vcnId = plan.vcnId ?? '';
-  const subnetId = plan.subnetId ?? '';
-  if (vcnId === '' || subnetId === '') {
-    throw new ConfigError('existing network mode requires a VCN and a subnet');
-  }
-  const vcns = await oci.listVcns(compartmentId);
-  const vcn = vcns.find((v) => v.id === vcnId);
-  if (vcn === undefined) throw new ConfigError(`VCN ${vcnId} not found in the selected compartment`);
-  const subnets = await oci.listSubnets(compartmentId, vcnId);
-  const subnet = subnets.find((s) => s.id === subnetId);
-  if (subnet === undefined) throw new ConfigError(`subnet ${subnetId} not found in VCN ${vcn.displayName ?? vcnId}`);
-  return {
-    vcnId,
-    subnetId,
-    vcnName: vcn.displayName ?? vcnId,
-    subnetName: subnet.displayName ?? subnetId,
-    subnetAd: subnet.availabilityDomain ?? null,
-    created: false,
-  };
-}
-
-// ---------------------------------------------------------------------- engine
-
-export type DeployOutcome =
-  | { readonly kind: 'succeeded'; readonly instanceId: string; readonly ad: string; readonly attempt: number; readonly logPath: string }
-  | { readonly kind: 'exists'; readonly instanceId: string }
-  | { readonly kind: 'failed'; readonly failure: Failure; readonly message: string; readonly logPath: string | null }
-  | { readonly kind: 'cancelled'; readonly logPath: string | null };
-
-async function findExistingInstance(oci: Oci, compartmentId: string, displayName: string): Promise<Instance | undefined> {
-  const instances = await oci.listInstances(compartmentId, displayName);
-  return instances.find(
-    (instance) => instance.displayName === displayName && instance.lifecycleState !== 'TERMINATED' && instance.lifecycleState !== 'TERMINATING',
-  );
-}
-
-function humanizeInterval(seconds: number): string {
-  return seconds >= 60 ? `${Math.round(seconds / 60)} minutes` : `${seconds} seconds`;
-}
-
-function formatNextRetry(now: Date, intervalSeconds: number): string {
-  return new Date(now.getTime() + intervalSeconds * 1000).toTimeString().slice(0, 8);
-}
-
-export interface EngineDeps {
-  readonly io: IO;
-  readonly oci: Oci;
-  readonly now: () => Date;
-  readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
-  readonly signal: AbortSignal | undefined;
-  readonly logsDir: string;
-  readonly onCycleFailed: (message: string, code: string) => Promise<void>;
-}
-
-export type AvailabilityDomainSpec = string | { readonly ad: string; readonly subnetId: string };
-
-export async function deployWithRetry(
-  ctx: {
-    compartmentId: string;
-    displayName: string;
-    shape: string;
-    shapeIsFlex: boolean;
-    ocpus: number | null;
-    memoryGbs: number | null;
-    diskGbs: number;
-    subnetId: string;
-    assignPublicIp: boolean;
-    imageId: string;
-    architecture: Architecture;
-    sshPublicKey: string;
-  },
-  availabilityDomains: readonly AvailabilityDomainSpec[],
-  intervalSeconds: number,
-  deps: EngineDeps,
-): Promise<DeployOutcome> {
-  let attempt = 0;
-  let lastLogPath: string | null = null;
-  let lastMessage = '';
-  let lastCode = '';
-  for (;;) {
-    const existing = await findExistingInstance(deps.oci, ctx.compartmentId, ctx.displayName);
-    if (existing !== undefined) return { kind: 'exists', instanceId: existing.id };
-
-    for (const target of availabilityDomains) {
-      if (deps.signal?.aborted) return { kind: 'cancelled', logPath: lastLogPath };
-      const ad = typeof target === 'string' ? target : target.ad;
-      const targetSubnetId = typeof target === 'string' ? ctx.subnetId : target.subnetId;
-      attempt += 1;
-      const timestamp = deps.now().toISOString();
-      const logBase = {
-        timestamp,
-        attempt,
-        availabilityDomain: ad,
-        instance: ctx.displayName,
-        architecture: ctx.architecture,
-        shape: ctx.shape,
-        ocpus: ctx.ocpus,
-        memory: ctx.memoryGbs,
-        disk: ctx.diskGbs,
-        operation: 'LaunchInstance' as const,
-      };
-      lastLogPath = join(deps.logsDir, attemptLogFileName(timestamp, attempt, ad));
-      deps.io.message(`Trying ${shortAd(ad)}...`);
-      try {
-        const instance = await deps.oci.launchInstance(
-          buildLaunchBody({ ...ctx, subnetId: targetSubnetId, availabilityDomain: ad }),
-        );
-        await writeAttemptLog(deps.logsDir, attemptLogFileName(timestamp, attempt, ad), buildAttemptLog({ ...logBase, result: 'SUCCEEDED' }));
-        return { kind: 'succeeded', instanceId: instance.id, ad, attempt, logPath: lastLogPath };
-      } catch (error) {
-        const failure = classifyFailure(error);
-        const message = error instanceof Error ? error.message : String(error);
-        lastMessage = message;
-        lastCode = failure.code;
-        await writeAttemptLog(
-          deps.logsDir,
-          attemptLogFileName(timestamp, attempt, ad),
-          buildAttemptLog({ ...logBase, result: 'FAILED', errorCode: failure.code, error: message }),
-        );
-        if (!failure.retryable) {
-          return { kind: 'failed', failure, message, logPath: lastLogPath };
-        }
-        deps.io.error(`${shortAd(ad)}: ${failure.code === 'OUT_OF_CAPACITY' ? 'Out of capacity' : message}`);
-      }
-    }
-
-    await deps.onCycleFailed(lastMessage, lastCode);
-    deps.io.message('\nNo Availability Domain currently has capacity.\n');
-    deps.io.message(`Retrying in ${humanizeInterval(intervalSeconds)}.\n`);
-    deps.io.message(`  Attempt:       ${attempt}`);
-    deps.io.message(`  Last error:    ${lastMessage}`);
-    deps.io.message(`  Next retry:    ${formatNextRetry(deps.now(), intervalSeconds)}\n`);
-    deps.io.message('Press Ctrl+C to stop.\n');
-    await deps.sleep(intervalSeconds * 1000, deps.signal);
-    if (deps.signal?.aborted) return { kind: 'cancelled', logPath: lastLogPath };
-  }
-}
-
-type AdSkipReason = 'shape-unavailable' | 'shape-lookup-failed' | 'no-compatible-subnet';
-
-interface SkippedAd {
-  readonly ad: string;
-  readonly reason: AdSkipReason;
-}
-
-function adOrdinal(ad: string): number {
-  const match = /-AD-(\d+)\s*$/i.exec(ad);
-  return match?.[1] === undefined ? 0 : Number(match[1]);
-}
-
-/** Higher-numbered ADs first: AD-3, AD-2, AD-1. Unknown names keep their API order. */
-function sortAdsHighestFirst<T extends { readonly ad: string }>(targets: readonly T[]): T[] {
-  return [...targets].sort((left, right) => adOrdinal(right.ad) - adOrdinal(left.ad));
-}
-
-function describeAdSkip(reason: AdSkipReason, shape: string): string {
-  switch (reason) {
-    case 'shape-unavailable':
-      return `shape ${shape} is not offered there`;
-    case 'shape-lookup-failed':
-      return 'the shape list could not be read there';
-    case 'no-compatible-subnet':
-      return 'no subnet in the VCN is usable in that Availability Domain';
-    default:
-      return assertNever(reason);
-  }
-}
-
-export async function resolveEngineAds(
-  oci: Oci,
-  compartmentId: string,
-  plan: Pick<DeploymentPlan, 'shape' | 'networkMode'>,
-  network: NetworkResult,
-): Promise<{ targets: { ad: string; subnetId: string }[]; skipped: SkippedAd[] }> {
-  const allAds = await oci.listAvailabilityDomains(compartmentId);
-  const subnets =
-    plan.networkMode === 'existing' && network.vcnId !== ''
-      ? await oci.listSubnets(compartmentId, network.vcnId)
-      : [];
-
-  const results: { ad: string; subnetId: string }[] = [];
-  const skipped: SkippedAd[] = [];
-
-  for (const ad of allAds) {
-    try {
-      const shapes = await oci.listShapes(compartmentId, ad);
-      if (!shapes.includes(plan.shape)) {
-        skipped.push({ ad, reason: 'shape-unavailable' });
-        continue;
-      }
-    } catch {
-      skipped.push({ ad, reason: 'shape-lookup-failed' });
-      continue;
-    }
-
-    let subnetId: string | null = null;
-    if (network.created || network.subnetAd === null) {
-      subnetId = network.subnetId;
-    } else if (subnets.length > 0) {
-      const sel = subnets.find((s) => s.id === network.subnetId);
-      if (sel && (sel.availabilityDomain === ad || sel.availabilityDomain === null || sel.availabilityDomain === undefined)) {
-        subnetId = sel.id;
-      } else {
-        const match =
-          subnets.find((s) => s.availabilityDomain === ad) ??
-          subnets.find((s) => s.availabilityDomain === null || s.availabilityDomain === undefined);
-        if (match) {
-          subnetId = match.id;
-        }
-      }
-    } else {
-      subnetId = network.subnetId;
-    }
-
-    if (subnetId !== null) {
-      results.push({ ad, subnetId });
-    } else {
-      skipped.push({ ad, reason: 'no-compatible-subnet' });
-    }
-  }
-
-  if (results.length === 0) {
-    const fallbackSubnetAd = network.subnetAd;
-    const adsToUse = fallbackSubnetAd === null || fallbackSubnetAd === undefined ? allAds : [fallbackSubnetAd];
-    // Fail open: a shape lookup or subnet match is best-effort, so try every AD rather than none.
-    return { targets: sortAdsHighestFirst(adsToUse.map((ad) => ({ ad, subnetId: network.subnetId }))), skipped: [] };
-  }
-
-  return { targets: sortAdsHighestFirst(results), skipped };
-}
-
-function buildDefaultsOut(plan: DeploymentPlan, region: string, network: NetworkResult): Record<string, unknown> {
-  return {
-    region,
-    architecture: plan.architecture,
-    compartment_id: plan.compartmentId,
-    network: { mode: 'existing', vcn_id: network.vcnId, subnet_id: network.subnetId },
-    instance: {
-      name: plan.instanceName,
-      shape: plan.shape,
-      ...(plan.ocpus === null ? {} : { ocpus: plan.ocpus }),
-      ...(plan.memoryGbs === null ? {} : { memory_gbs: plan.memoryGbs }),
-      disk_gbs: plan.diskGbs,
-      assign_public_ip: plan.assignPublicIp,
-    },
-    ssh: { public_key_file: plan.sshKeyFile },
-    retry: { interval_seconds: plan.intervalSeconds },
-  };
-}
-
-// ------------------------------------------------------------------------ run
-
-export interface RunDeps {
-  readonly endpointOverride?: string | undefined;
-  readonly now?: () => Date;
-  readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
-  readonly signal?: AbortSignal;
-  readonly logsDir?: string;
-}
-
-export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promise<number> {
-  const now = deps.now ?? (() => new Date());
-  const sleep =
-    deps.sleep ??
-    ((ms: number, signal?: AbortSignal) =>
-      new Promise<void>((res) => {
-        if (signal?.aborted) {
-          res();
-          return;
-        }
-        const timer = setTimeout(() => res(), ms);
-        signal?.addEventListener('abort', () => {
-          clearTimeout(timer);
-          res();
-        }, { once: true });
-      }));
-  const configPath = cli.configPath ?? DEFAULT_CONFIG_FILE;
-  const logsDir = deps.logsDir ?? LOGS_DIR;
-  let plan: DeploymentPlan | null = null;
-  let loaded: { data: YamlConfig; raw: Record<string, unknown> } | null = null;
-  let lastLogPath: string | null = null;
-
-  try {
-    loaded = await loadYamlConfig(configPath);
-    const resolved = resolveConfig(loaded.data.defaults, cli);
-    let ociAuth: OciAuth;
-    try {
-      ociAuth = await loadOciAuth(cli.profile);
-    } catch (error) {
-      if (error instanceof OciConfigError && io.interactive) {
-        await setupOciConfigInteractive(io);
-        ociAuth = await loadOciAuth(cli.profile);
-      } else {
-        throw error;
-      }
-    }
-    const oci = new Oci(ociAuth, { endpointOverride: deps.endpointOverride });
-
-    io.intro(`${APP.name} v${appVersion()}`);
-    plan = cli.jsonMode ? await buildPlanJson(oci, ociAuth, resolved) : await buildPlanInteractive(io, oci, ociAuth, resolved);
-
-    const allAds = await oci.listAvailabilityDomains(plan.compartmentId);
-    const availabilityDomainsState = { ...(loaded.data.state ?? {}), availability_domains: [...allAds] };
-    await saveYamlConfig(configPath, loaded.raw, { state: availabilityDomainsState });
-    loaded = {
-      data: { ...loaded.data, state: availabilityDomainsState },
-      raw: { ...loaded.raw, state: availabilityDomainsState },
-    };
-    const existing = await computeExistingStorage(oci, plan.compartmentId, allAds);
-    const storage = projectStorage(existing.totalGb, existing.items, plan.diskGbs);
-
-    if (io.interactive) {
-      renderStorageWarning(io, storage);
-      if (storage.exceedsWarn && !cli.yes) {
-        const proceed = await io.confirm('Continue?', true);
-        if (!proceed) throw new CancelledError();
-      }
-      renderSummary(io, plan, storage, allAds);
-      if (!cli.yes) {
-        const deploy = await io.confirm('Deploy this infrastructure?', true);
-        if (!deploy) throw new CancelledError();
-      }
-    }
-
-    io.message('Starting deployment...\n');
-    io.step('Configuration validated');
-    io.step('OCI connection verified');
-    const network = await prepareNetwork(oci, plan.compartmentId, plan);
-    io.step('Network ready');
-    const engine = await resolveEngineAds(oci, plan.compartmentId, plan, network);
-    const engineAds = engine.targets;
-    const adNames = engineAds.map((target) => shortAd(target.ad)).join(', ');
-    io.step(`Using ${engineAds.length} Availability Domain${engineAds.length === 1 ? '' : 's'}${adNames === '' ? '' : ` (${adNames})`}`);
-    for (const entry of engine.skipped) {
-      io.warn(`${shortAd(entry.ad)} skipped: ${describeAdSkip(entry.reason, plan.shape)}`);
-    }
-    const singleAd = allAds[0];
-    if (allAds.length === 1 && singleAd !== undefined) {
-      io.warn(`Region ${plan.region} exposes a single Availability Domain (${shortAd(singleAd)}); capacity retries will repeat there.`);
-    }
-
-    const outcome = await deployWithRetry(
-      {
-        compartmentId: plan.compartmentId,
-        displayName: plan.instanceName,
-        shape: plan.shape,
-        shapeIsFlex: plan.shapeIsFlex,
-        ocpus: plan.ocpus,
-        memoryGbs: plan.memoryGbs,
-        diskGbs: plan.diskGbs,
-        subnetId: network.subnetId,
-        assignPublicIp: plan.assignPublicIp,
-        imageId: plan.image.id,
-        architecture: plan.architecture,
-        sshPublicKey: plan.sshPublicKey,
-      },
-      engineAds,
-      plan.intervalSeconds,
-      {
-        io,
-        oci,
-        now,
-        sleep,
-        signal: deps.signal,
-        logsDir,
-        onCycleFailed: async (message, code) => {
-          if (plan !== null && loaded !== null) {
-            const lastError: LastErrorOut = { timestamp: now().toISOString(), code, message };
-            loaded = { raw: loaded.raw, data: { ...loaded.data, last_error: lastError } };
-            await saveYamlConfig(configPath, loaded.raw, {
-              defaults: buildDefaultsOut(plan, plan.region, network),
-              state: loaded.data.state ?? {},
-              last_error: lastError,
-            });
-          }
-        },
-      },
-    );
-
-    switch (outcome.kind) {
-      case 'exists': {
-        io.success(`Instance "${plan.instanceName}" already exists.\n\n  OCID: ${outcome.instanceId}\n\nNothing else to do.`);
-        io.outro('Done.');
-        if (cli.jsonMode) {
-          writeJson({ status: 'exists', instance_id: outcome.instanceId, instance_name: plan.instanceName });
-        }
-        return EXIT.success;
-      }
-      case 'succeeded': {
-        lastLogPath = outcome.logPath;
-        const state = {
-          ...(loaded.data.state ?? {}),
-          last_deployment: {
-            status: 'succeeded',
-            timestamp: now().toISOString(),
-            instance_id: outcome.instanceId,
-            instance_name: plan.instanceName,
-            availability_domain: outcome.ad,
-            architecture: plan.architecture,
-            shape: plan.shape,
-            disk_gbs: plan.diskGbs,
-            ...(plan.ocpus === null ? {} : { ocpus: plan.ocpus }),
-            ...(plan.memoryGbs === null ? {} : { memory_gbs: plan.memoryGbs }),
-            public_ip: plan.assignPublicIp,
-            vcn_id: network.vcnId,
-            subnet_id: network.subnetId,
-          },
-        };
-        await saveYamlConfig(configPath, loaded.raw, {
-          defaults: buildDefaultsOut(plan, plan.region, network),
-          state,
-          last_error: loaded.data.last_error ?? {},
-        });
-        io.success('Instance created');
-        io.message('\nDeployment successful\n');
-        io.message(`  Instance:       ${plan.instanceName}`);
-        io.message(`  Instance OCID:  ${outcome.instanceId}`);
-        io.message(`  Architecture:   ${plan.architecture === 'arm64' ? 'ARM64' : 'x86_64'}`);
-        io.message(`  Shape:          ${plan.shape}`);
-        io.message(`  AD:             ${shortAd(outcome.ad)}`);
-        io.message(`\nConfiguration saved to:\n  ${configPath}`);
-        io.outro('Done.');
-        if (cli.jsonMode) {
-          writeJson({
-            status: 'succeeded',
-            instance_id: outcome.instanceId,
-            instance_name: plan.instanceName,
-            availability_domain: outcome.ad,
-            architecture: plan.architecture,
-            shape: plan.shape,
-            ocpus: plan.ocpus,
-            memory_gbs: plan.memoryGbs,
-            disk_gbs: plan.diskGbs,
-            public_ip: plan.assignPublicIp,
-            network: { mode: plan.networkMode, vcn_id: network.vcnId, subnet_id: network.subnetId, created: network.created },
-            attempts: outcome.attempt,
-            config_path: configPath,
-            last_log: outcome.logPath,
-          });
-        }
-        return EXIT.success;
-      }
-      case 'cancelled': {
-        lastLogPath = outcome.logPath;
-        return finishCancelled(cli, io, configPath, loaded, plan, network, lastLogPath, now);
-      }
-      case 'failed': {
-        lastLogPath = outcome.logPath;
-        await saveFailureState(configPath, loaded, plan, network, outcome.failure, outcome.message, now);
-        io.error('Deployment failed\n');
-        io.message(`Reason:\n  ${outcome.message}\n`);
-        io.message('This error is not retryable.\n');
-        io.message(`${failureAdvice(outcome.failure.kind)}\n`);
-        if (outcome.logPath !== null) io.message(`Attempt log:\n  ${outcome.logPath}`);
-        io.outro('Failed.');
-        if (cli.jsonMode) {
-          writeJson({ error: { code: outcome.failure.code, message: outcome.message, attempt_log: outcome.logPath } });
-        }
-        return outcome.failure.exitCode;
-      }
-      default:
-        return assertNever(outcome);
-    }
-  } catch (error) {
-    if (error instanceof CancelledError) {
-      return finishCancelled(cli, io, configPath, loaded, plan, null, lastLogPath, now);
-    }
-    const failure = classifyFailure(error);
-    if (plan !== null && loaded !== null) {
-      await saveFailureState(configPath, loaded, plan, null, failure, failure.message, now);
-    }
-    if (error instanceof OciConfigError) {
-      io.error('OCI configuration not found.\n');
-      if (!probeBinary('oci')) {
-        io.message('The OCI CLI is not installed. Install it first:\n');
-        io.message('  https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm\n');
-      }
-      io.message('Configure OCI first:\n');
-      io.message('  oci setup config\n');
-      io.message('\nThen run:\n');
-      io.message('    npx oci-free-vm\n');
-    } else {
-      io.error(failure.message);
-      io.message(`${failureAdvice(failure.kind)}\n`);
-      if (lastLogPath !== null) io.message(`Attempt log:\n  ${lastLogPath}`);
-    }
-    if (cli.jsonMode) {
-      const cliHint =
-        error instanceof OciConfigError && !probeBinary('oci')
-          ? ' Install the OCI CLI first: https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm'
-          : '';
-      writeJson({ error: { code: failure.code, message: `${failure.message}${cliHint}` } });
-    } else {
-      io.outro('Failed.');
-    }
-    return failure.exitCode;
-  }
-}
-
-async function saveFailureState(
-  configPath: string,
-  loaded: { data: YamlConfig; raw: Record<string, unknown> },
-  plan: DeploymentPlan,
-  network: NetworkResult | null,
-  failure: Failure,
-  message: string,
-  now: () => Date,
-): Promise<void> {
-  await saveYamlConfig(configPath, loaded.raw, {
-    defaults: buildDefaultsOut(plan, plan.region, network ?? { vcnId: plan.vcnId ?? '', subnetId: plan.subnetId ?? '', vcnName: plan.vcnName ?? '', subnetName: plan.subnetName ?? '', subnetAd: null, created: false }),
-    state: loaded.data.state ?? {},
-    last_error: { timestamp: now().toISOString(), code: failure.code, message },
-  });
-}
-
-async function finishCancelled(
-  cli: CliOverrides,
-  io: IO,
-  configPath: string,
-  loaded: { data: YamlConfig; raw: Record<string, unknown> } | null,
-  plan: DeploymentPlan | null,
-  network: NetworkResult | null,
-  lastLogPath: string | null,
-  now: () => Date,
-): Promise<number> {
-  if (loaded !== null && plan !== null) {
-    const previousError = loaded.data.last_error ?? {};
-    await saveYamlConfig(configPath, loaded.raw, {
-      defaults: buildDefaultsOut(plan, plan.region, network ?? { vcnId: plan.vcnId ?? '', subnetId: plan.subnetId ?? '', vcnName: plan.vcnName ?? '', subnetName: plan.subnetName ?? '', subnetAd: null, created: false }),
-      state: loaded.data.state ?? {},
-      last_error: previousError,
-    });
-  }
-  io.message('\nDeployment stopped.\n');
-  io.message('No resources were deleted.\n');
-  io.message(`Last state saved to:\n  ${configPath}\n`);
-  if (lastLogPath !== null) io.message(`Last attempt log:\n  ${lastLogPath}\n`);
-  io.outro('Stopped.');
-  if (cli.jsonMode) {
-    writeJson({ status: 'cancelled', config_path: configPath, ...(lastLogPath === null ? {} : { last_attempt_log: lastLogPath }) });
-  }
-  return EXIT.cancelled;
 }
 
 function renderStorageWarning(io: IO, storage: StorageReport): void {
@@ -1400,7 +353,214 @@ function renderSummary(io: IO, plan: DeploymentPlan, storage: StorageReport, ads
   io.message('');
 }
 
-// ------------------------------------------------------------------------ main
+function toPositiveInt(name: string, raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new ConfigError(`--${name} must be a positive integer (got "${raw}")`);
+  }
+  return value;
+}
+
+function toPositiveNumber(name: string, raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new ConfigError(`--${name} must be a positive number (got "${raw}")`);
+  }
+  return value;
+}
+
+export function parseCliArgs(argv: readonly string[]): CliOverrides {
+  const values = new Map<string, string | boolean>();
+  let index = 0;
+  while (index < argv.length) {
+    const arg = argv[index];
+    if (arg === undefined) break;
+    if (arg === '--') throw new ConfigError('positional arguments are not supported');
+    if (!arg.startsWith('--')) throw new ConfigError(`unexpected argument "${arg}"`);
+    const eq = arg.indexOf('=');
+    const name = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
+    if (name === '') throw new ConfigError(`unexpected argument "${arg}"`);
+    if (!BOOLEAN_FLAGS.has(name) && !VALUE_FLAGS.has(name)) throw new ConfigError(`unknown option --${name}`);
+    if (BOOLEAN_FLAGS.has(name)) {
+      if (eq !== -1) {
+        const explicit = arg.slice(eq + 1);
+        if (explicit !== 'true' && explicit !== 'false') throw new ConfigError(`--${name} must be "true" or "false"`);
+        values.set(name, explicit === 'true');
+      } else {
+        values.set(name, true);
+      }
+    } else if (eq !== -1) {
+      values.set(name, arg.slice(eq + 1));
+    } else {
+      const next = argv[index + 1];
+      if (next === undefined || next.startsWith('--')) throw new ConfigError(`--${name} requires a value`);
+      values.set(name, next);
+      index += 1;
+    }
+    index += 1;
+  }
+  const str = (name: string): string | undefined => {
+    const value = values.get(name);
+    return typeof value === 'string' ? value : undefined;
+  };
+  const nonEmpty = (name: string): string | undefined => {
+    const value = str(name);
+    return value === '' ? undefined : value;
+  };
+  const archValue = str('arch');
+  let architecture: Architecture | undefined;
+  if (archValue === 'arm64' || archValue === 'x86_64') architecture = archValue;
+  else if (archValue !== undefined) throw new ConfigError(`--arch must be "arm64" or "x86_64" (got "${archValue}")`);
+  const publicIpValue = str('public-ip');
+  let assignPublicIp: boolean | undefined;
+  if (publicIpValue === 'true') assignPublicIp = true;
+  else if (publicIpValue === 'false') assignPublicIp = false;
+  else if (publicIpValue !== undefined) throw new ConfigError(`--public-ip must be "true" or "false" (got "${publicIpValue}")`);
+  const networkModeValue = str('network-mode');
+  let networkMode: NetworkMode | undefined;
+  if (networkModeValue === 'existing' || networkModeValue === 'create') networkMode = networkModeValue;
+  else if (networkModeValue !== undefined) throw new ConfigError(`--network-mode must be "existing" or "create" (got "${networkModeValue}")`);
+  const delay = str('delay');
+  const intervalSeconds =
+    delay !== undefined ? toPositiveInt('delay', delay) : toPositiveInt('interval-seconds', str('interval-seconds'));
+  return {
+    configPath: nonEmpty('config'),
+    profile: nonEmpty('profile'),
+    jsonMode: values.get('json') === true,
+    yes: values.get('yes') === true,
+    help: values.get('help') === true,
+    version: values.get('version') === true,
+    region: nonEmpty('region'),
+    compartmentId: nonEmpty('compartment-id'),
+    architecture,
+    networkMode,
+    vcnId: nonEmpty('vcn-id'),
+    subnetId: nonEmpty('subnet-id'),
+    shape: nonEmpty('shape'),
+    ocpus: toPositiveInt('ocpus', str('ocpus')),
+    memoryGbs: toPositiveNumber('memory', str('memory')),
+    diskGbs: toPositiveInt('disk', str('disk')),
+    instanceName: nonEmpty('name'),
+    sshKeyFile: nonEmpty('ssh-key'),
+    assignPublicIp,
+    intervalSeconds,
+  };
+}
+
+export async function setupOciConfigInteractive(io: IO): Promise<void> {
+  io.intro('OCI Configuration Setup');
+  io.message('No OCI configuration found. Let\'s create one.');
+  io.message('');
+
+  const user = await io.text('User OCID', { validate: validateRequired });
+  const tenancy = await io.text('Tenancy OCID', { validate: validateRequired });
+  const fingerprint = await io.text('API Key Fingerprint', { validate: validateRequired });
+  const region = await io.select('Region', [
+    { value: 'us-ashburn-1', label: 'us-ashburn-1 (US East - Ashburn)' },
+    { value: 'us-phoenix-1', label: 'us-phoenix-1 (US West - Phoenix)' },
+    { value: 'eu-frankfurt-1', label: 'eu-frankfurt-1 (Germany Central - Frankfurt)' },
+    { value: 'uk-london-1', label: 'uk-london-1 (UK South - London)' },
+    { value: 'ap-tokyo-1', label: 'ap-tokyo-1 (Japan East - Tokyo)' },
+    { value: 'ap-sydney-1', label: 'ap-sydney-1 (Australia East - Sydney)' },
+    { value: 'sa-saopaulo-1', label: 'sa-saopaulo-1 (Brazil East - Sao Paulo)' },
+    { value: 'ca-toronto-1', label: 'ca-toronto-1 (Canada Southeast - Toronto)' },
+    { value: 'ap-seoul-1', label: 'ap-seoul-1 (South Korea Central - Seoul)' },
+    { value: 'ap-mumbai-1', label: 'ap-mumbai-1 (India West - Mumbai)' },
+    { value: 'ap-osaka-1', label: 'ap-osaka-1 (Japan Central - Osaka)' },
+    { value: 'eu-zurich-1', label: 'eu-zurich-1 (Switzerland North - Zurich)' },
+    { value: 'eu-madrid-1', label: 'eu-madrid-1 (Spain Central - Madrid)' },
+    { value: 'me-jeddah-1', label: 'me-jeddah-1 (Saudi Arabia West - Jeddah)' },
+    { value: 'me-dubai-1', label: 'me-dubai-1 (UAE East - Dubai)' },
+    { value: 'ap-melbourne-1', label: 'ap-melbourne-1 (Australia Southeast - Melbourne)' },
+    { value: 'ap-hyderabad-1', label: 'ap-hyderabad-1 (India South - Hyderabad)' },
+  ], 'us-ashburn-1');
+
+  const keyFile = join(homedir(), '.oci', 'oci_api_key.pem');
+  const keyDir = dirname(keyFile);
+  await mkdir(keyDir, { recursive: true });
+
+  io.message('');
+  io.message('Private key:');
+  io.message('Paste your PEM-formatted RSA private key (including BEGIN/END lines).');
+  io.message('Press Ctrl+D (or Ctrl+Z on Windows) when done.');
+  io.message('');
+
+  const privateKeyPem = await readPrivateKeyFromStdin();
+
+  if (!privateKeyPem.trim().startsWith('-----BEGIN')) {
+    throw new ConfigError('Private key must be in PEM format (start with -----BEGIN)');
+  }
+
+  try {
+    createPrivateKey(privateKeyPem);
+  } catch {
+    throw new ConfigError('Invalid PEM private key');
+  }
+
+  await writeFile(keyFile, privateKeyPem, { mode: 0o600 });
+
+  const configPath = join(homedir(), '.oci', 'config');
+  const profile = process.env['OCI_CONFIG_PROFILE'] ?? 'DEFAULT';
+  const configContent = '[' + profile + ']\n' +
+    'user=' + user + '\n' +
+    'tenancy=' + tenancy + '\n' +
+    'fingerprint=' + fingerprint + '\n' +
+    'region=' + region + '\n' +
+    'key_file=' + keyFile + '\n';
+  await writeFile(configPath, configContent, { mode: 0o600 });
+
+  io.success('OCI configuration saved to ' + configPath);
+  io.message('Private key saved to ' + keyFile);
+  io.message('');
+}
+
+async function readPrivateKeyFromStdin(): Promise<string> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    process.stdin.on('data', (chunk: Buffer | string) => chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk));
+    process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    process.stdin.resume();
+  });
+}
+
+function printUsage(): void {
+  process.stdout.write(
+    [
+      `${APP.name} v${appVersion()} — deploy an OCI VM and automatically retry when capacity is unavailable.`,
+      '',
+      'Usage:',
+      '  oci-free-vm [options]',
+      '',
+      'Options:',
+      '  --config <path>           configuration file (default: ./oci-free-vm.yaml)',
+      '  --profile <name>          OCI config profile (default: DEFAULT)',
+      '  --json                    machine-readable JSON output, non-interactive',
+      '  --yes                     skip confirmation prompts',
+      '  --name <name>             instance name',
+      '  --region <region>         OCI region (default: from ~/.oci/config)',
+      '  --compartment-id <ocid>   compartment OCID',
+      '  --arch <arch>             arm64 | x86_64',
+      '  --shape <shape>           instance shape (e.g. VM.Standard.A1.Flex)',
+      '  --ocpus <n>               OCPUs (flexible shapes)',
+      '  --memory <gb>             memory in GB (flexible shapes)',
+      '  --disk <gb>               boot volume size in GB',
+      '  --ssh-key <path>          SSH public key file (default: ~/.ssh/id_ed25519.pub)',
+      '  --public-ip <bool>         "true" or "false"',
+      '  --delay <n>               retry delay in seconds between AD cycles (default: 900)',
+      '  --interval-seconds <n>    alias for --delay',
+      '  --network-mode <mode>     existing | create',
+      '  --vcn-id <ocid>           existing VCN OCID',
+      '  --subnet-id <ocid>        existing subnet OCID',
+      '  --version                 print version',
+      '  --help                    print this help',
+      '',
+      'Precedence: CLI arguments > YAML defaults > interactive prompts > application defaults.',
+      '',
+    ].join('\n'),
+  );
+}
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
@@ -1433,7 +593,12 @@ async function main(): Promise<void> {
   const controller = new AbortController();
   const onSigint = (): void => controller.abort();
   process.on('SIGINT', onSigint);
-  const code = await run(cli, io, { signal: controller.signal });
+  const code = await run(cli, io, {
+    signal: controller.signal,
+    setupOciConfig: setupOciConfigInteractive,
+    buildInteractivePlan: buildPlanInteractive,
+    render: { storageWarning: renderStorageWarning, summary: renderSummary },
+  });
   process.off('SIGINT', onSigint);
   process.exit(code);
 }

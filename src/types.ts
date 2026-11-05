@@ -4,6 +4,7 @@ import type { KeyObject } from 'node:crypto';
 import * as ociCore from 'oci-core';
 import { z } from 'zod';
 
+import type { Oci } from './core.ts';
 export const APP = { name: 'oci-free-vm' } as const;
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -105,8 +106,6 @@ export interface OciAuth {
   readonly privateKeyPem: string;
   readonly passphrase?: string | undefined;
 }
-// ------------------------------------------------------------ official SDK types
-
 export interface Compartment {
   readonly id: string;
   readonly name: string;
@@ -250,7 +249,60 @@ export interface DeploymentPlan {
   readonly intervalSeconds: number;
   readonly image: Image;
 }
-// ------------------------------------------------------------------ yaml config
+export type OciServiceError = { statusCode: number; serviceCode: string; message: string };
+
+export interface NetworkResult {
+  readonly vcnId: string;
+  readonly subnetId: string;
+  readonly vcnName: string;
+  readonly subnetName: string;
+  readonly subnetAd: string | null;
+  readonly created: boolean;
+}
+
+export type DeployOutcome =
+  | { readonly kind: 'succeeded'; readonly instanceId: string; readonly ad: string; readonly attempt: number; readonly logPath: string }
+  | { readonly kind: 'exists'; readonly instanceId: string }
+  | { readonly kind: 'failed'; readonly failure: Failure; readonly message: string; readonly logPath: string | null }
+  | { readonly kind: 'cancelled'; readonly logPath: string | null };
+
+export interface EngineDeps {
+  readonly io: IO;
+  readonly oci: Oci;
+  readonly now: () => Date;
+  readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
+  readonly signal: AbortSignal | undefined;
+  readonly logsDir: string;
+  readonly onCycleFailed: (message: string, code: string) => Promise<void>;
+}
+
+export type AvailabilityDomainSpec = string | { readonly ad: string; readonly subnetId: string };
+
+export type AdSkipReason = 'shape-unavailable' | 'shape-lookup-failed' | 'no-compatible-subnet';
+
+export interface SkippedAd {
+  readonly ad: string;
+  readonly reason: AdSkipReason;
+}
+
+export interface RunRenderer {
+  readonly storageWarning: (io: IO, storage: StorageReport) => void;
+  readonly summary: (io: IO, plan: DeploymentPlan, storage: StorageReport, ads: readonly string[]) => void;
+}
+
+export interface RunDeps {
+  readonly endpointOverride?: string | undefined;
+  readonly now?: () => Date;
+  readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  readonly signal?: AbortSignal;
+  readonly logsDir?: string;
+  /** CLI presentation callbacks; required for interactive runs, unused in --json mode. */
+  readonly render?: RunRenderer | undefined;
+  /** Interactive OCI setup; required when credentials are missing in interactive mode. */
+  readonly setupOciConfig?: ((io: IO) => Promise<void>) | undefined;
+  /** Builds the interactive plan; required for interactive runs, unused in --json mode. */
+  readonly buildInteractivePlan?: ((io: IO, oci: Oci, auth: OciAuth, resolved: ResolvedConfig) => Promise<DeploymentPlan>) | undefined;
+}
 
 const networkDefaultsSchema = z.object({
   mode: z.enum(['existing', 'create']).optional(),

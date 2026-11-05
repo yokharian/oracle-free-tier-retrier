@@ -9,16 +9,13 @@ import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import process from 'node:process';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { z } from 'zod';
-import { LIMITS, EXIT, BOOLEAN_FLAGS, VALUE_FLAGS, yamlConfigSchema } from './types.ts';
-import type { Architecture, CliOverrides, Failure, FailureCode, FailureKind, Image, IO, LaunchInstanceDetails, NetworkMode, OciAuth, ResolvedConfig, StorageReport, YamlConfig, YamlDefaults } from './types.ts';
+import { LIMITS, EXIT, yamlConfigSchema } from './types.ts';
+import type { Architecture, CliOverrides, Failure, FailureKind, Image, LaunchInstanceDetails, OciAuth, ResolvedConfig, StorageReport, YamlConfig, YamlDefaults } from './types.ts';
 
 export function assertNever(value: never): never {
   throw new Error(`unhandled variant: ${JSON.stringify(value)}`);
 }
 
-
-// ---------------------------------------------------------------------- errors
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -115,8 +112,6 @@ export function failureAdvice(kind: FailureKind): string {
 }
 
 
-// ------------------------------------------------------------ secret sanitizing
-
 export function stripNulls(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((item) => stripNulls(item));
   if (value !== null && typeof value === 'object') {
@@ -197,102 +192,6 @@ export async function saveYamlConfig(
 }
 
 
-function toPositiveInt(name: string, raw: string | undefined): number | undefined {
-  if (raw === undefined) return undefined;
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new ConfigError(`--${name} must be a positive integer (got "${raw}")`);
-  }
-  return value;
-}
-
-function toPositiveNumber(name: string, raw: string | undefined): number | undefined {
-  if (raw === undefined) return undefined;
-  const value = Number(raw);
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new ConfigError(`--${name} must be a positive number (got "${raw}")`);
-  }
-  return value;
-}
-
-
-export function parseCliArgs(argv: readonly string[]): CliOverrides {
-  const values = new Map<string, string | boolean>();
-  let index = 0;
-  while (index < argv.length) {
-    const arg = argv[index];
-    if (arg === undefined) break;
-    if (arg === '--') throw new ConfigError('positional arguments are not supported');
-    if (!arg.startsWith('--')) throw new ConfigError(`unexpected argument "${arg}"`);
-    const eq = arg.indexOf('=');
-    const name = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
-    if (name === '') throw new ConfigError(`unexpected argument "${arg}"`);
-    if (!BOOLEAN_FLAGS.has(name) && !VALUE_FLAGS.has(name)) throw new ConfigError(`unknown option --${name}`);
-    if (BOOLEAN_FLAGS.has(name)) {
-      if (eq !== -1) {
-        const explicit = arg.slice(eq + 1);
-        if (explicit !== 'true' && explicit !== 'false') throw new ConfigError(`--${name} must be "true" or "false"`);
-        values.set(name, explicit === 'true');
-      } else {
-        values.set(name, true);
-      }
-    } else if (eq !== -1) {
-      values.set(name, arg.slice(eq + 1));
-    } else {
-      const next = argv[index + 1];
-      if (next === undefined || next.startsWith('--')) throw new ConfigError(`--${name} requires a value`);
-      values.set(name, next);
-      index += 1;
-    }
-    index += 1;
-  }
-  const str = (name: string): string | undefined => {
-    const value = values.get(name);
-    return typeof value === 'string' ? value : undefined;
-  };
-  const nonEmpty = (name: string): string | undefined => {
-    const value = str(name);
-    return value === '' ? undefined : value;
-  };
-  const archValue = str('arch');
-  let architecture: Architecture | undefined;
-  if (archValue === 'arm64' || archValue === 'x86_64') architecture = archValue;
-  else if (archValue !== undefined) throw new ConfigError(`--arch must be "arm64" or "x86_64" (got "${archValue}")`);
-  const publicIpValue = str('public-ip');
-  let assignPublicIp: boolean | undefined;
-  if (publicIpValue === 'true') assignPublicIp = true;
-  else if (publicIpValue === 'false') assignPublicIp = false;
-  else if (publicIpValue !== undefined) throw new ConfigError(`--public-ip must be "true" or "false" (got "${publicIpValue}")`);
-  const networkModeValue = str('network-mode');
-  let networkMode: NetworkMode | undefined;
-  if (networkModeValue === 'existing' || networkModeValue === 'create') networkMode = networkModeValue;
-  else if (networkModeValue !== undefined) throw new ConfigError(`--network-mode must be "existing" or "create" (got "${networkModeValue}")`);
-  const delay = str('delay');
-  const intervalSeconds =
-    delay !== undefined ? toPositiveInt('delay', delay) : toPositiveInt('interval-seconds', str('interval-seconds'));
-  return {
-    configPath: nonEmpty('config'),
-    profile: nonEmpty('profile'),
-    jsonMode: values.get('json') === true,
-    yes: values.get('yes') === true,
-    help: values.get('help') === true,
-    version: values.get('version') === true,
-    region: nonEmpty('region'),
-    compartmentId: nonEmpty('compartment-id'),
-    architecture,
-    networkMode,
-    vcnId: nonEmpty('vcn-id'),
-    subnetId: nonEmpty('subnet-id'),
-    shape: nonEmpty('shape'),
-    ocpus: toPositiveInt('ocpus', str('ocpus')),
-    memoryGbs: toPositiveNumber('memory', str('memory')),
-    diskGbs: toPositiveInt('disk', str('disk')),
-    instanceName: nonEmpty('name'),
-    sshKeyFile: nonEmpty('ssh-key'),
-    assignPublicIp,
-    intervalSeconds,
-  };
-}
 
 
 export function parseOciConfigText(text: string): Map<string, Record<string, string>> {
@@ -582,79 +481,53 @@ export function validateFlexResources(shapeIsFlex: boolean, ocpus: number | null
 
 
 
-// ---------------------------------------------------------- interactive oci setup
-export async function setupOciConfigInteractive(io: IO): Promise<void> {
-  io.intro('OCI Configuration Setup');
-  io.message('No OCI configuration found. Let\'s create one.');
-  io.message('');
-
-  const user = await io.text('User OCID', { validate: (v: string) => (v.trim() === '' ? 'required' : undefined) });
-  const tenancy = await io.text('Tenancy OCID', { validate: (v: string) => (v.trim() === '' ? 'required' : undefined) });
-  const fingerprint = await io.text('API Key Fingerprint', { validate: (v: string) => (v.trim() === '' ? 'required' : undefined) });
-  const region = await io.select('Region', [
-    { value: 'us-ashburn-1', label: 'us-ashburn-1 (US East - Ashburn)' },
-    { value: 'us-phoenix-1', label: 'us-phoenix-1 (US West - Phoenix)' },
-    { value: 'eu-frankfurt-1', label: 'eu-frankfurt-1 (Germany Central - Frankfurt)' },
-    { value: 'uk-london-1', label: 'uk-london-1 (UK South - London)' },
-    { value: 'ap-tokyo-1', label: 'ap-tokyo-1 (Japan East - Tokyo)' },
-    { value: 'ap-sydney-1', label: 'ap-sydney-1 (Australia East - Sydney)' },
-    { value: 'sa-saopaulo-1', label: 'sa-saopaulo-1 (Brazil East - Sao Paulo)' },
-    { value: 'ca-toronto-1', label: 'ca-toronto-1 (Canada Southeast - Toronto)' },
-    { value: 'ap-seoul-1', label: 'ap-seoul-1 (South Korea Central - Seoul)' },
-    { value: 'ap-mumbai-1', label: 'ap-mumbai-1 (India West - Mumbai)' },
-    { value: 'ap-osaka-1', label: 'ap-osaka-1 (Japan Central - Osaka)' },
-    { value: 'eu-zurich-1', label: 'eu-zurich-1 (Switzerland North - Zurich)' },
-    { value: 'eu-madrid-1', label: 'eu-madrid-1 (Spain Central - Madrid)' },
-    { value: 'me-jeddah-1', label: 'me-jeddah-1 (Saudi Arabia West - Jeddah)' },
-    { value: 'me-dubai-1', label: 'me-dubai-1 (UAE East - Dubai)' },
-    { value: 'ap-melbourne-1', label: 'ap-melbourne-1 (Australia Southeast - Melbourne)' },
-    { value: 'ap-hyderabad-1', label: 'ap-hyderabad-1 (India South - Hyderabad)' },
-  ], 'us-ashburn-1');
-
-  const keyFile = join(homedir(), '.oci', 'oci_api_key.pem');
-  const keyDir = dirname(keyFile);
-  await mkdir(keyDir, { recursive: true });
-
-  io.message('');
-  io.message('Private key:');
-  io.message('Paste your PEM-formatted RSA private key (including BEGIN/END lines).');
-  io.message('Press Ctrl+D (or Ctrl+Z on Windows) when done.');
-  io.message('');
-
-  const privateKeyPem = await readPrivateKeyFromStdin();
-
-  if (!privateKeyPem.trim().startsWith('-----BEGIN')) {
-    throw new ConfigError('Private key must be in PEM format (start with -----BEGIN)');
-  }
-
-  try {
-    createPrivateKey(privateKeyPem);
-  } catch {
-    throw new ConfigError('Invalid PEM private key');
-  }
-
-  await writeFile(keyFile, privateKeyPem, { mode: 0o600 });
-
-  const configPath = join(homedir(), '.oci', 'config');
-  const profile = process.env['OCI_CONFIG_PROFILE'] ?? 'DEFAULT';
-  const configContent = '[' + profile + ']\n' +
-    'user=' + user + '\n' +
-    'tenancy=' + tenancy + '\n' +
-    'fingerprint=' + fingerprint + '\n' +
-    'region=' + region + '\n' +
-    'key_file=' + keyFile + '\n';
-  await writeFile(configPath, configContent, { mode: 0o600 });
-
-  io.success('OCI configuration saved to ' + configPath);
-  io.message('Private key saved to ' + keyFile);
-  io.message('');
+export function writeJson(value: unknown): void {
+  process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
-async function readPrivateKeyFromStdin(): Promise<string> {
-  return new Promise((resolve) => {
-    const chunks: Buffer[] = [];
-    process.stdin.on('data', (chunk: Buffer | string) => chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk));
-    process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    process.stdin.resume();
-  });
+
+export function architectureForShape(shape: string): Architecture {
+  return shape.startsWith('VM.Standard.A1') ? 'arm64' : 'x86_64';
+}
+
+
+export function shapesForArchitecture(shapes: readonly string[], architecture: Architecture): string[] {
+  return shapes.filter((shape) => architectureForShape(shape) === architecture);
+}
+
+
+export function validateInstanceName(name: string): string {
+  const trimmed = name.trim();
+  if (trimmed === '') throw new ConfigError('instance name must not be empty');
+  if (trimmed.length > 255) throw new ConfigError('instance name must be at most 255 characters');
+  return trimmed;
+}
+
+
+export async function writeAttemptLog(dir: string, fileName: string, content: string): Promise<string> {
+  await mkdir(dir, { recursive: true });
+  const path = join(dir, fileName);
+  await writeFile(path, content, 'utf8');
+  return path;
+}
+
+
+export function humanizeInterval(seconds: number): string {
+  return seconds >= 60 ? `${Math.round(seconds / 60)} minutes` : `${seconds} seconds`;
+}
+
+
+export function formatNextRetry(now: Date, intervalSeconds: number): string {
+  return new Date(now.getTime() + intervalSeconds * 1000).toTimeString().slice(0, 8);
+}
+
+
+export function adOrdinal(ad: string): number {
+  const match = /-AD-(\d+)\s*$/i.exec(ad);
+  return match?.[1] === undefined ? 0 : Number(match[1]);
+}
+
+/** Higher-numbered ADs first: AD-3, AD-2, AD-1. Unknown names keep their API order. */
+export function sortAdsHighestFirst<T extends { readonly ad: string }>(targets: readonly T[]): T[] {
+  return [...targets].sort((left, right) => adOrdinal(right.ad) - adOrdinal(left.ad));
 }
