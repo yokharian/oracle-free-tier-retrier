@@ -64,7 +64,7 @@ The image is published automatically by [`.github/workflows/docker.yml`](.github
 
 ### 1. Install the prerequisites
 
-**Node.js ≥ 20** (required for `npx`):
+**Node.js 22.23.4+, 24.22.1+, or 26.12.1+** (required for `npx`). These are the first releases of each line patched for [CVE-2026-111497](https://nvd.nist.gov/vuln/detail/CVE-2026-111497), a high-severity Brotli decoder flaw that can lead to remote code execution. Node 20 is end-of-life and has no patched release, so it is not supported. npm treats `engines` as advisory: older versions print an `EBADENGINE` warning but may still run the CLI.
 
 - Any OS: official installers — <https://nodejs.org/en/download>
 - macOS: `brew install node`
@@ -243,6 +243,7 @@ Filenames are filesystem-safe on macOS, Linux, and Windows. Each log records the
 - **Instance already exists** — the CLI detects existing instances by name and does nothing.
 - **Non-interactive environments** — use `--json`; every required value must come from CLI flags or the YAML file.
 - **Only one Availability Domain is tried** — check what the region exposes with `oci iam availability-domain list --compartment-id <tenancy-ocid> --region <region>`. Some regions (for example `mx-monterrey-1`) have a single AD; an AD that does not exist cannot be tried, so capacity retries repeat in the same one. When an AD is skipped, the CLI now prints the reason (shape unavailable, shape lookup failed, or no compatible subnet).
+- **`EBADENGINE Unsupported engine` warning** — the installed Node is below the security floor (22.23.4 / 24.22.1 / 26.12.1). npm still runs the CLI, but those older releases contain an unpatched Brotli decoder RCE (CVE-2026-111497). Upgrade Node instead of lowering the requirement; the `engines` range is a security floor, not a packaging quirk.
 - **An old version runs despite updates** — `npx` caches packages; run `npm cache clean --force` to fetch the latest release. If you run a local build, rebuild it with `npm run build`; a stale `dist/` keeps the old behavior even after `src/` changes.
 
 </details>
