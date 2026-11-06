@@ -1042,6 +1042,35 @@ describe('run in --json mode against a local fake', () => {
     });
   });
 
+  it('continues when state cannot be persisted', async () => {
+    await withOciConfigEnv(async () => {
+      const f = await getFixture();
+      const dir = await mkdtemp(join(tmpdir(), 'oci-free-vm-run-'));
+      const mock = await MockOci.start();
+      try {
+        const code = await run(
+          overrides({
+            jsonMode: true,
+            configPath: join(dir, 'missing', 'oci-free-vm.yaml'),
+            compartmentId: 'ocid1.compartment.oc1..sandbox',
+            vcnId: 'ocid1.vcn.oc1..v1',
+            subnetId: 'ocid1.subnet.oc1..s1',
+            instanceName: 'devbox',
+            diskGbs: 100,
+            sshKeyFile: f.sshKeyPath,
+          }),
+          jsonIo(),
+          { endpointOverride: mock.url, logsDir: join(dir, 'logs'), sleep: async () => {}, now: () => FIXED_DATE },
+        );
+        assert.equal(code, 0);
+        assert.equal(mock.launchRequests.length, 1);
+      } finally {
+        await mock.close();
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   it('deploys after a capacity failure, persists state, and logs attempts', async () => {
     await withOciConfigEnv(async () => {
       const f = await getFixture();

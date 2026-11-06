@@ -752,7 +752,7 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
     const activePlan = plan;
     const allAds = await withTransientRetry('Listing Availability Domains', io, sleep, deps.signal, () => oci.listAvailabilityDomains(activePlan.compartmentId));
     const availabilityDomainsState = { ...(loaded.data.state ?? {}), availability_domains: [...allAds] };
-    await saveYamlConfig(configPath, loaded.raw, { state: availabilityDomainsState });
+    await persistState(configPath, loaded.raw, { state: availabilityDomainsState }, io, 'save the Availability Domain list');
     loaded = {
       data: { ...loaded.data, state: availabilityDomainsState },
       raw: { ...loaded.raw, state: availabilityDomainsState },
@@ -829,11 +829,17 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
           if (plan !== null && loaded !== null) {
             const lastError: LastErrorOut = { timestamp: now().toISOString(), code, message };
             loaded = { raw: loaded.raw, data: { ...loaded.data, last_error: lastError } };
-            await saveYamlConfig(configPath, loaded.raw, {
-              defaults: buildDefaultsOut(plan, plan.region, network),
-              state: loaded.data.state ?? {},
-              last_error: lastError,
-            });
+            await persistState(
+              configPath,
+              loaded.raw,
+              {
+                defaults: buildDefaultsOut(plan, plan.region, network),
+                state: loaded.data.state ?? {},
+                last_error: lastError,
+              },
+              io,
+              'save the retry state',
+            );
           }
         },
       },
@@ -868,11 +874,17 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
             subnet_id: network.subnetId,
           },
         };
-        await saveYamlConfig(configPath, loaded.raw, {
-          defaults: buildDefaultsOut(plan, plan.region, network),
-          state,
-          last_error: loaded.data.last_error ?? {},
-        });
+        await persistState(
+          configPath,
+          loaded.raw,
+          {
+            defaults: buildDefaultsOut(plan, plan.region, network),
+            state,
+            last_error: loaded.data.last_error ?? {},
+          },
+          io,
+          'save the deployment state',
+        );
         io.success('Instance created');
         io.message('\nDeployment successful\n');
         io.message(`  Instance:       ${plan.instanceName}`);
@@ -908,7 +920,7 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
       }
       case 'failed': {
         lastLogPath = outcome.logPath;
-        await saveFailureState(configPath, loaded, plan, network, outcome.failure, outcome.message, now);
+        await saveFailureState(configPath, loaded, plan, network, outcome.failure, outcome.message, io, now);
         io.error('Deployment failed\n');
         io.message(`Reason:\n  ${outcome.message}\n`);
         io.message('This error is not retryable.\n');
@@ -929,7 +941,7 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
     }
     const failure = classifyFailure(error);
     if (plan !== null && loaded !== null) {
-      await saveFailureState(configPath, loaded, plan, null, failure, failure.message, now);
+      await saveFailureState(configPath, loaded, plan, null, failure, failure.message, io, now);
     }
     if (error instanceof OciConfigError) {
       io.error('OCI configuration not found.\n');
@@ -959,6 +971,20 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
   }
 }
 
+async function persistState(
+  configPath: string,
+  raw: Record<string, unknown>,
+  sections: Parameters<typeof saveYamlConfig>[2],
+  io: IO,
+  label: string,
+): Promise<void> {
+  try {
+    await saveYamlConfig(configPath, raw, sections);
+  } catch (error) {
+    io.warn(`Could not ${label}: ${describeThrown(error)}`);
+  }
+}
+
 async function saveFailureState(
   configPath: string,
   loaded: { data: YamlConfig; raw: Record<string, unknown> },
@@ -966,13 +992,20 @@ async function saveFailureState(
   network: NetworkResult | null,
   failure: Failure,
   message: string,
+  io: IO,
   now: () => Date,
 ): Promise<void> {
-  await saveYamlConfig(configPath, loaded.raw, {
-    defaults: buildDefaultsOut(plan, plan.region, network ?? emptyNetwork(plan)),
-    state: loaded.data.state ?? {},
-    last_error: { timestamp: now().toISOString(), code: failure.code, message },
-  });
+  await persistState(
+    configPath,
+    loaded.raw,
+    {
+      defaults: buildDefaultsOut(plan, plan.region, network ?? emptyNetwork(plan)),
+      state: loaded.data.state ?? {},
+      last_error: { timestamp: now().toISOString(), code: failure.code, message },
+    },
+    io,
+    'save the failure state',
+  );
 }
 
 async function finishCancelled(
@@ -986,11 +1019,17 @@ async function finishCancelled(
 ): Promise<number> {
   if (loaded !== null && plan !== null) {
     const previousError = loaded.data.last_error ?? {};
-    await saveYamlConfig(configPath, loaded.raw, {
-      defaults: buildDefaultsOut(plan, plan.region, network ?? emptyNetwork(plan)),
-      state: loaded.data.state ?? {},
-      last_error: previousError,
-    });
+    await persistState(
+      configPath,
+      loaded.raw,
+      {
+        defaults: buildDefaultsOut(plan, plan.region, network ?? emptyNetwork(plan)),
+        state: loaded.data.state ?? {},
+        last_error: previousError,
+      },
+      io,
+      'save the last state',
+    );
   }
   io.message('\nDeployment stopped.\n');
   io.message('No resources were deleted.\n');

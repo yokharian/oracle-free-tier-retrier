@@ -1150,6 +1150,7 @@ npx oci-free-vm
 34. Run the published Docker image on `linux/amd64` and `linux/arm64`.
 35. Keep typecheck, build, and the test suite green before release.
 36. Append every attempt to a single `oci-free-vm.log`.
+37. Treat log and state write failures as warnings, not run-ending errors.
 
 ---
 
