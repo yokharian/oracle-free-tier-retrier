@@ -602,7 +602,7 @@ The CLI must:
 6. Check whether the instance already exists.
 7. Continue until success or explicit cancellation.
 
-A region may expose a single Availability Domain (for example `mx-monterrey-1`). The CLI warns once at startup in that case; retries repeat in the same AD because no other AD exists.
+A region may expose a single Availability Domain (for example `mx-monterrey-1`). The CLI warns once at startup in that case; retries repeat in the same AD because no other AD exists. Transient network failures during setup are retried up to three times with backoff before the run gives up.
 
 Default retry interval:
 
@@ -786,6 +786,7 @@ At minimum classify:
 - Out of capacity.
 - Temporary OCI service failures.
 - Transient network errors.
+- Transient network failures during setup, retried up to three times with backoff.
 
 ### Non-retryable
 

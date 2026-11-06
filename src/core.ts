@@ -9,7 +9,7 @@ import * as ociIdentity from 'oci-identity';
 import { APP, DEFAULT_CONFIG_FILE, LOGS_DIR, EXIT, APP_DEFAULTS } from './types.ts';
 import type { AdSkipReason, Architecture, AvailabilityDomainSpec, BootVolume, CliOverrides, Compartment, DeployOutcome, DeploymentPlan, EngineDeps, Failure, Image, Instance, IO, LaunchInstanceDetails, LastErrorOut, NetworkResult, OciAuth, OciServiceError, ResolvedConfig, RouteTable, RunDeps, SecurityList, SkippedAd, Subnet, Vcn, YamlConfig } from './types.ts';
 import {
-  CancelledError, ConfigError, NetworkError, OciConfigError, OciHttpError, appVersion, assertNever, buildAttemptLog, buildLaunchBody, classifyFailure, detectSshPublicKeyFile, describeThrown, failureAdvice, isFlexShape, loadOciAuth, loadYamlConfig, pickUbuntuImage, probeBinary, projectStorage, readSshPublicKey, resolveConfig, sanitize, saveYamlConfig, shortAd, stripNulls, validateDisk, validateFlexResources,
+  CancelledError, ConfigError, NetworkError, OciConfigError, OciHttpError, appVersion, assertNever, buildAttemptLog, buildLaunchBody, classifyFailure, detectSshPublicKeyFile, describeThrown, failureAdvice, isFlexShape, isOciRetrierError, loadOciAuth, loadYamlConfig, pickUbuntuImage, probeBinary, projectStorage, readSshPublicKey, resolveConfig, sanitize, saveYamlConfig, shortAd, stripNulls, validateDisk, validateFlexResources,
   appendAttemptLog, formatNextRetry, humanizeInterval, sortAdsHighestFirst, validateInstanceName, writeJson,
 } from './utils.ts';
 
@@ -78,6 +78,9 @@ export class Oci {
       if (isOciServiceError(error)) {
         const code = error.serviceCode === '' ? undefined : error.serviceCode;
         throw new OciHttpError(operation, error.statusCode, code, sanitize(error.message));
+      }
+      if (isOciRetrierError(error)) {
+        throw new NetworkError(`${operation}: ${describeThrown(error)}`);
       }
       if (
         error instanceof TypeError ||
@@ -502,8 +505,33 @@ export async function deployWithRetry(
     }
   };
 
+  const waitForNextCycle = async (reason: string): Promise<boolean> => {
+    await deps.onCycleFailed(lastMessage, lastCode);
+    deps.io.message(`\n${reason}\n`);
+    deps.io.message(`Retrying in ${humanizeInterval(intervalSeconds)}.\n`);
+    deps.io.message(`  Attempt:       ${attempt}`);
+    deps.io.message(`  Last error:    ${lastMessage}`);
+    deps.io.message(`  Next retry:    ${formatNextRetry(deps.now(), intervalSeconds)}\n`);
+    deps.io.message('Press Ctrl+C to stop.\n');
+    await deps.sleep(intervalSeconds * 1000, deps.signal);
+    return deps.signal?.aborted === true;
+  };
+
   for (;;) {
-    const existing = await findExistingInstance(deps.oci, ctx.compartmentId, ctx.displayName);
+    let existing: Instance | undefined;
+    try {
+      existing = await findExistingInstance(deps.oci, ctx.compartmentId, ctx.displayName);
+    } catch (error) {
+      const failure = classifyFailure(error);
+      if (!failure.retryable) throw error;
+      lastMessage = failure.message;
+      lastCode = failure.code;
+      deps.io.error(`Availability check failed: ${failure.message}`);
+      if (await waitForNextCycle('Availability check failed; retrying.')) {
+        return { kind: 'cancelled', logPath: lastLogPath };
+      }
+      continue;
+    }
     if (existing !== undefined) return { kind: 'exists', instanceId: existing.id };
 
     for (const target of availabilityDomains) {
@@ -546,15 +574,9 @@ export async function deployWithRetry(
       }
     }
 
-    await deps.onCycleFailed(lastMessage, lastCode);
-    deps.io.message('\nNo Availability Domain currently has capacity.\n');
-    deps.io.message(`Retrying in ${humanizeInterval(intervalSeconds)}.\n`);
-    deps.io.message(`  Attempt:       ${attempt}`);
-    deps.io.message(`  Last error:    ${lastMessage}`);
-    deps.io.message(`  Next retry:    ${formatNextRetry(deps.now(), intervalSeconds)}\n`);
-    deps.io.message('Press Ctrl+C to stop.\n');
-    await deps.sleep(intervalSeconds * 1000, deps.signal);
-    if (deps.signal?.aborted) return { kind: 'cancelled', logPath: lastLogPath };
+    if (await waitForNextCycle('No Availability Domain currently has capacity.')) {
+      return { kind: 'cancelled', logPath: lastLogPath };
+    }
   }
 }
 
@@ -657,6 +679,27 @@ function buildDefaultsOut(plan: DeploymentPlan, region: string, network: Network
   };
 }
 
+async function withTransientRetry<T>(
+  label: string,
+  io: IO,
+  sleep: (ms: number, signal?: AbortSignal) => Promise<void>,
+  signal: AbortSignal | undefined,
+  work: () => Promise<T>,
+): Promise<T> {
+  const maxAttempts = 3;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await work();
+    } catch (error) {
+      const failure = classifyFailure(error);
+      if (!failure.retryable || attempt >= maxAttempts) throw error;
+      io.warn(`${label} failed (${failure.message}); retrying in ${attempt * 2}s.`);
+      await sleep(attempt * 2000, signal);
+      if (signal?.aborted === true) throw new CancelledError();
+    }
+  }
+}
+
 export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promise<number> {
   const now = deps.now ?? (() => new Date());
   const sleep =
@@ -699,14 +742,15 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
 
     io.intro(`${APP.name} v${appVersion()}`);
     if (cli.jsonMode) {
-      plan = await buildPlanJson(oci, ociAuth, resolved);
+      plan = await withTransientRetry('Loading the OCI plan', io, sleep, deps.signal, () => buildPlanJson(oci, ociAuth, resolved));
     } else {
       const buildInteractivePlan = deps.buildInteractivePlan;
       if (buildInteractivePlan === undefined) throw new Error('internal error: interactive run requires a plan builder');
       plan = await buildInteractivePlan(io, oci, ociAuth, resolved);
     }
 
-    const allAds = await oci.listAvailabilityDomains(plan.compartmentId);
+    const activePlan = plan;
+    const allAds = await withTransientRetry('Listing Availability Domains', io, sleep, deps.signal, () => oci.listAvailabilityDomains(activePlan.compartmentId));
     const availabilityDomainsState = { ...(loaded.data.state ?? {}), availability_domains: [...allAds] };
     await saveYamlConfig(configPath, loaded.raw, { state: availabilityDomainsState });
     loaded = {
@@ -734,9 +778,18 @@ export async function run(cli: CliOverrides, io: IO, deps: RunDeps = {}): Promis
     io.message('Starting deployment...\n');
     io.step('Configuration validated');
     io.step('OCI connection verified');
-    const network = await prepareNetwork(oci, plan.compartmentId, plan);
+    const network =
+      activePlan.networkMode === 'existing'
+        ? await withTransientRetry('Preparing the network', io, sleep, deps.signal, () => prepareNetwork(oci, activePlan.compartmentId, activePlan))
+        : await prepareNetwork(oci, activePlan.compartmentId, activePlan);
     io.step('Network ready');
-    const engine = await resolveEngineAds(oci, plan.compartmentId, plan, network);
+    const engine = await withTransientRetry(
+      'Resolving Availability Domains',
+      io,
+      sleep,
+      deps.signal,
+      () => resolveEngineAds(oci, activePlan.compartmentId, activePlan, network),
+    );
     const engineAds = engine.targets;
     const adNames = engineAds.map((target) => shortAd(target.ad)).join(', ');
     io.step(`Using ${engineAds.length} Availability Domain${engineAds.length === 1 ? '' : 's'}${adNames === '' ? '' : ` (${adNames})`}`);

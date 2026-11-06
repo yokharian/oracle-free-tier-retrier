@@ -69,6 +69,7 @@ class MockOci {
   instances: { id: string; displayName: string; lifecycleState: string }[] = [];
   bootVolumes: { displayName: string; sizeInGBs: number }[] = [];
   launchFailures: LaunchFailure[] = [];
+  availabilityDomainFailures = 0;
   securityListUpdateBodies: unknown[] = [];
   subnets: { id: string; displayName: string; vcnId: string; availabilityDomain: string | null }[] = [
     { id: 'ocid1.subnet.oc1..s1', displayName: 'public-subnet', vcnId: 'ocid1.vcn.oc1..v1', availabilityDomain: null },
@@ -136,6 +137,10 @@ class MockOci {
       return send(200, [{ id: 'ocid1.compartment.oc1..sandbox', name: 'sandbox', lifecycleState: 'ACTIVE' }]);
     }
     if (req.method === 'GET' && path === '/20160918/availabilityDomains') {
+      if (this.availabilityDomainFailures > 0) {
+        this.availabilityDomainFailures -= 1;
+        return send(500, { code: 'InternalError', message: 'temporary failure' });
+      }
       return send(200, [
         { name: 'fNXZ:US-ASHBURN-AD-1' },
         { name: 'fNXZ:US-ASHBURN-AD-2' },
@@ -709,6 +714,62 @@ describe('Oci client against a local fake', () => {
 });
 
 describe('deployWithRetry', () => {
+  it('retries a transient failure from the pre-cycle existence check', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'oci-free-vm-engine-'));
+    try {
+      const sleeps: number[] = [];
+      const cycles: { message: string; code: string }[] = [];
+      let checks = 0;
+      const oci = {
+        listInstances: async () => {
+          checks += 1;
+          if (checks === 1) {
+            throw { code: 'ECONNRESET', message: 'socket hang up', requestEndpoint: 'https://compute', troubleshootingPage: 'see docs' };
+          }
+          return [];
+        },
+        launchInstance: async () => ({ id: 'ocid1.instance.oc1..1', displayName: 'devbox', lifecycleState: 'PROVISIONING' }),
+      } as unknown as Oci;
+      const outcome = await deployWithRetry(
+        {
+          compartmentId: 'ocid1.compartment.oc1..sandbox',
+          displayName: 'devbox',
+          shape: 'VM.Standard.A1.Flex',
+          shapeIsFlex: true,
+          ocpus: 1,
+          memoryGbs: 6,
+          diskGbs: 100,
+          subnetId: 'ocid1.subnet.oc1..s1',
+          assignPublicIp: true,
+          imageId: 'ocid1.image.oc1..ubuntu2404',
+          architecture: 'arm64',
+          sshPublicKey: 'ssh-ed25519 AAAAtest test',
+        },
+        ['fNXZ:US-ASHBURN-AD-1'],
+        900,
+        {
+          io: recordingIo([]),
+          oci,
+          now: () => FIXED_DATE,
+          sleep: async (ms) => {
+            sleeps.push(ms);
+          },
+          signal: undefined,
+          logsDir: dir,
+          onCycleFailed: async (message, code) => {
+            cycles.push({ message, code });
+          },
+        },
+      );
+      assert.equal(outcome.kind, 'succeeded');
+      assert.equal(outcome.attempt, 1);
+      assert.deepEqual(sleeps, [900_000]);
+      assert.deepEqual(cycles, [{ message: 'transport: ECONNRESET: socket hang up', code: 'TRANSIENT' }]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('advances to the next AD after a capacity failure', async () => {
     const mock = await MockOci.start();
     const dir = await mkdtemp(join(tmpdir(), 'oci-free-vm-engine-'));
@@ -951,6 +1012,36 @@ describe('resolveEngineAds', () => {
 });
 
 describe('run in --json mode against a local fake', () => {
+  it('retries a transient setup failure before deploying', async () => {
+    await withOciConfigEnv(async () => {
+      const f = await getFixture();
+      const dir = await mkdtemp(join(tmpdir(), 'oci-free-vm-run-'));
+      const mock = await MockOci.start();
+      try {
+        mock.availabilityDomainFailures = 1;
+        const code = await run(
+          overrides({
+            jsonMode: true,
+            configPath: join(dir, 'oci-free-vm.yaml'),
+            compartmentId: 'ocid1.compartment.oc1..sandbox',
+            vcnId: 'ocid1.vcn.oc1..v1',
+            subnetId: 'ocid1.subnet.oc1..s1',
+            instanceName: 'devbox',
+            diskGbs: 100,
+            sshKeyFile: f.sshKeyPath,
+          }),
+          jsonIo(),
+          { endpointOverride: mock.url, logsDir: join(dir, 'logs'), sleep: async () => {}, now: () => FIXED_DATE },
+        );
+        assert.equal(code, 0);
+        assert.equal(mock.launchRequests.length, 1);
+      } finally {
+        await mock.close();
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   it('deploys after a capacity failure, persists state, and logs attempts', async () => {
     await withOciConfigEnv(async () => {
       const f = await getFixture();
