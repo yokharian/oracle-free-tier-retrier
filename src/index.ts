@@ -594,15 +594,17 @@ async function main(): Promise<void> {
     process.exit(EXIT.invalidConfig);
   }
   const controller = new AbortController();
-  const onSigint = (): void => controller.abort();
-  process.on('SIGINT', onSigint);
+  const onSignal = (): void => controller.abort();
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
   const code = await run(cli, io, {
     signal: controller.signal,
     setupOciConfig: setupOciConfigInteractive,
     buildInteractivePlan: buildPlanInteractive,
     render: { storageWarning: renderStorageWarning, summary: renderSummary },
   });
-  process.off('SIGINT', onSigint);
+  process.off('SIGINT', onSignal);
+  process.off('SIGTERM', onSignal);
   process.exit(code);
 }
 
