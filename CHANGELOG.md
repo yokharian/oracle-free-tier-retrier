@@ -6,15 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-05
+
 ### Added
 
 - Restored the product requirements as `docs/prd.md` and refreshed them for the current architecture.
+- Added `docs/concepts.md`, covering authentication, the OCI API operations, retry cycles, failure classification, and state persistence.
 
 ### Changed
 
 - Split the CLI shell (`src/index.ts`) from the deployment engine (`src/core.ts`), centralized shared types in `src/types.ts`, and moved small helpers to `src/utils.ts`.
 - Removed redundant section-divider comments and deduplicated the empty-network fallback in the run state helpers.
 - Rewrote the README around the npx path, moved Docker to the end, and extracted the CLI, configuration, and development references into `docs/`.
+- Attempt logs now append to a single `oci-free-vm.log` instead of one file per attempt.
+
+### Fixed
+
+- The OCI SDK's transport retrier envelope is now formatted and classified as transient, and a retryable failure from the pre-cycle instance check waits and retries instead of ending the run with `[object Object]`.
+- Local filesystem failures (full disk, permissions) are reported as `LOCAL` with actionable advice, and log/state write failures no longer stop the retry loop.
+- Transient network failures during setup are retried up to three times with backoff.
+- `retry.interval_seconds` is validated against the `setTimeout` limit.
+- SIGTERM is handled like SIGINT, so Docker stops cancel cleanly.
 
 ## [0.6.0] - 2026-11-04
 
