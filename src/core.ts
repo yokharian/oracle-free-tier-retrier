@@ -2,7 +2,6 @@
 // engine, and the run orchestrator. The CLI shell (prompts, interactive plan, rendering,
 // entry point) is index.ts; small pure helpers live in utils.ts.
 
-import { join } from 'node:path';
 import process from 'node:process';
 import * as ociCommon from 'oci-common';
 import * as ociCore from 'oci-core';
@@ -10,8 +9,8 @@ import * as ociIdentity from 'oci-identity';
 import { APP, DEFAULT_CONFIG_FILE, LOGS_DIR, EXIT, APP_DEFAULTS } from './types.ts';
 import type { AdSkipReason, Architecture, AvailabilityDomainSpec, BootVolume, CliOverrides, Compartment, DeployOutcome, DeploymentPlan, EngineDeps, Failure, Image, Instance, IO, LaunchInstanceDetails, LastErrorOut, NetworkResult, OciAuth, OciServiceError, ResolvedConfig, RouteTable, RunDeps, SecurityList, SkippedAd, Subnet, Vcn, YamlConfig } from './types.ts';
 import {
-  CancelledError, ConfigError, NetworkError, OciConfigError, OciHttpError, appVersion, assertNever, attemptLogFileName, buildAttemptLog, buildLaunchBody, classifyFailure, detectSshPublicKeyFile, failureAdvice, isFlexShape, loadOciAuth, loadYamlConfig, pickUbuntuImage, probeBinary, projectStorage, readSshPublicKey, resolveConfig, sanitize, saveYamlConfig, shortAd, stripNulls, validateDisk, validateFlexResources,
-  formatNextRetry, humanizeInterval, sortAdsHighestFirst, validateInstanceName, writeAttemptLog, writeJson,
+  CancelledError, ConfigError, NetworkError, OciConfigError, OciHttpError, appVersion, assertNever, buildAttemptLog, buildLaunchBody, classifyFailure, detectSshPublicKeyFile, describeThrown, failureAdvice, isFlexShape, loadOciAuth, loadYamlConfig, pickUbuntuImage, probeBinary, projectStorage, readSshPublicKey, resolveConfig, sanitize, saveYamlConfig, shortAd, stripNulls, validateDisk, validateFlexResources,
+  appendAttemptLog, formatNextRetry, humanizeInterval, sortAdsHighestFirst, validateInstanceName, writeJson,
 } from './utils.ts';
 
 function cleanIngressRule(rule: ociCore.models.IngressSecurityRule): ociCore.models.IngressSecurityRule {
@@ -494,6 +493,15 @@ export async function deployWithRetry(
   let lastLogPath: string | null = null;
   let lastMessage = '';
   let lastCode = '';
+
+  const writeLog = async (content: string): Promise<void> => {
+    try {
+      lastLogPath = await appendAttemptLog(deps.logsDir, content);
+    } catch (error) {
+      deps.io.warn(`Could not append attempt log: ${describeThrown(error)}`);
+    }
+  };
+
   for (;;) {
     const existing = await findExistingInstance(deps.oci, ctx.compartmentId, ctx.displayName);
     if (existing !== undefined) return { kind: 'exists', instanceId: existing.id };
@@ -516,22 +524,19 @@ export async function deployWithRetry(
         disk: ctx.diskGbs,
         operation: 'LaunchInstance' as const,
       };
-      lastLogPath = join(deps.logsDir, attemptLogFileName(timestamp, attempt, ad));
       deps.io.message(`Trying ${shortAd(ad)}...`);
       try {
         const instance = await deps.oci.launchInstance(
           buildLaunchBody({ ...ctx, subnetId: targetSubnetId, availabilityDomain: ad }),
         );
-        await writeAttemptLog(deps.logsDir, attemptLogFileName(timestamp, attempt, ad), buildAttemptLog({ ...logBase, result: 'SUCCEEDED' }));
+        await writeLog(buildAttemptLog({ ...logBase, result: 'SUCCEEDED' }));
         return { kind: 'succeeded', instanceId: instance.id, ad, attempt, logPath: lastLogPath };
       } catch (error) {
         const failure = classifyFailure(error);
-        const message = error instanceof Error ? error.message : String(error);
+        const message = describeThrown(error);
         lastMessage = message;
         lastCode = failure.code;
-        await writeAttemptLog(
-          deps.logsDir,
-          attemptLogFileName(timestamp, attempt, ad),
+        await writeLog(
           buildAttemptLog({ ...logBase, result: 'FAILED', errorCode: failure.code, error: message }),
         );
         if (!failure.retryable) {

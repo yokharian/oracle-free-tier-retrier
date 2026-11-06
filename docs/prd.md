@@ -655,9 +655,9 @@ The MVP does not require cloud-side durable execution.
 
 ---
 
-## 19. Per-Attempt Infrastructure Logs
+## 19. Deployment Log
 
-Every infrastructure deployment attempt must produce a log file.
+Every infrastructure deployment attempt must produce a log entry.
 
 Create a local directory:
 
@@ -665,16 +665,13 @@ Create a local directory:
 ~/.oci/oci-free-vm-logs/
 ```
 
-Each attempt receives its own log file.
-
-Example:
+Each attempt appends one block to a single file:
 
 ```text
-~/.oci/oci-free-vm-logs/
-├── 2026-10-05T18-30-00-000Z-attempt-001-AD-3.log
-├── 2026-10-05T18-45-00-000Z-attempt-002-AD-2.log
-└── 2026-10-05T19-00-00-000Z-attempt-003-AD-1.log
+~/.oci/oci-free-vm-logs/oci-free-vm.log
 ```
+
+Entries are separated by a line of `=` characters.
 
 The log must contain enough information to troubleshoot the infrastructure attempt.
 
@@ -699,30 +696,32 @@ Error code: OUT_OF_CAPACITY
 Error: Out of capacity
 ```
 
+A failure to append the log is a warning and must not change the deployment result.
+
 Logs must **never contain private keys, authentication tokens, passwords, or other secrets**.
 
 ---
 
-## 20. Log Naming
+## 20. Log Format
 
-Log filenames must be:
+Each appended block must be deterministic and contain:
 
-- deterministic enough to identify the attempt;
-- filesystem-safe;
-- valid on macOS, Linux, and Windows.
+- timestamp;
+- attempt number;
+- full Availability Domain name;
+- instance name, architecture, shape, OCPUs, memory, and disk;
+- operation and result;
+- error code and message on failure.
 
-Recommended format:
+The fixed filename `oci-free-vm.log` is valid on macOS, Linux, and Windows, so no per-attempt filename rules are needed.
 
-```text
-YYYY-MM-DDTHH-mm-ss-SSSZ-attempt-NNN-AD-N.log
-```
-
-Avoid `:` in filenames because Windows does not allow it.
-
-Example:
+Example block header:
 
 ```text
-2026-10-05T18-30-00-000Z-attempt-001-AD-3.log
+============================================================
+Timestamp: 2026-10-05T18:30:00Z
+Attempt: 1
+Availability Domain: fNXZ:US-ASHBURN-AD-1
 ```
 
 ---
@@ -1149,6 +1148,7 @@ npx oci-free-vm
 33. Warn when the region exposes a single AD.
 34. Run the published Docker image on `linux/amd64` and `linux/arm64`.
 35. Keep typecheck, build, and the test suite green before release.
+36. Append every attempt to a single `oci-free-vm.log`.
 
 ---
 
@@ -1211,5 +1211,5 @@ OCI VM deployment
     ↓
 Automatic capacity retry
     ↓
-Local state + per-attempt logs
+Local state + append-only log
 ```

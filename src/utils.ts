@@ -4,12 +4,12 @@ import { createPrivateKey } from 'node:crypto';
 import type { KeyObject } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, appendFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import process from 'node:process';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { LIMITS, EXIT, yamlConfigSchema } from './types.ts';
+import { LIMITS, EXIT, LOG_FILE_NAME, yamlConfigSchema } from './types.ts';
 import type { Architecture, CliOverrides, Failure, FailureKind, Image, LaunchInstanceDetails, OciAuth, ResolvedConfig, StorageReport, YamlConfig, YamlDefaults } from './types.ts';
 
 export function assertNever(value: never): never {
@@ -374,12 +374,6 @@ export function shortAd(ad: string): string {
 }
 
 /** Windows-safe attempt log filename (§20): YYYY-MM-DDTHH-mm-ss-SSSZ-attempt-NNN-<ad>.log */
-export function attemptLogFileName(isoTimestamp: string, attempt: number, availabilityDomain: string): string {
-  const ts = isoTimestamp.replace(/[:.]/g, '-');
-  const ad = shortAd(availabilityDomain).replace(/[^A-Za-z0-9-]/g, '-');
-  return `${ts}-attempt-${String(attempt).padStart(3, '0')}-${ad}.log`;
-}
-
 export function buildAttemptLog(args: {
   timestamp: string;
   attempt: number;
@@ -551,10 +545,10 @@ export function validateInstanceName(name: string): string {
 }
 
 
-export async function writeAttemptLog(dir: string, fileName: string, content: string): Promise<string> {
+export async function appendAttemptLog(dir: string, content: string): Promise<string> {
   await mkdir(dir, { recursive: true });
-  const path = join(dir, fileName);
-  await writeFile(path, content, 'utf8');
+  const path = join(dir, LOG_FILE_NAME);
+  await appendFile(path, `\n${'='.repeat(72)}\n${content.trimEnd()}\n`, 'utf8');
   return path;
 }
 

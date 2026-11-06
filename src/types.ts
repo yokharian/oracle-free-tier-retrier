@@ -11,6 +11,7 @@ import { join } from 'node:path';
 
 export const DEFAULT_CONFIG_FILE = join(homedir(), '.oci', 'oci-free-vm.yaml');
 export const LOGS_DIR = join(homedir(), '.oci', 'oci-free-vm-logs');
+export const LOG_FILE_NAME = 'oci-free-vm.log';
 
 export const LIMITS = {
   storageWarnGb: 200,
@@ -261,7 +262,7 @@ export interface NetworkResult {
 }
 
 export type DeployOutcome =
-  | { readonly kind: 'succeeded'; readonly instanceId: string; readonly ad: string; readonly attempt: number; readonly logPath: string }
+  | { readonly kind: 'succeeded'; readonly instanceId: string; readonly ad: string; readonly attempt: number; readonly logPath: string | null }
   | { readonly kind: 'exists'; readonly instanceId: string }
   | { readonly kind: 'failed'; readonly failure: Failure; readonly message: string; readonly logPath: string | null }
   | { readonly kind: 'cancelled'; readonly logPath: string | null };

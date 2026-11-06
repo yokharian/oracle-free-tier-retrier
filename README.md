@@ -54,7 +54,7 @@ Values resolve as **flags > YAML > prompts > defaults**. The YAML file stores yo
 
 ## Logs
 
-Every attempt writes its own file under `~/.oci/oci-free-vm-logs/`. No private keys or signatures are written.
+Every attempt appends a block to `~/.oci/oci-free-vm-logs/oci-free-vm.log`, separated by a line of `=` characters. No private keys or signatures are written.
 
 ## Troubleshooting
 

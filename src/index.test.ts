@@ -13,7 +13,6 @@ import {
   OciConfigError,
   OciHttpError,
   appVersion,
-  attemptLogFileName,
   buildLaunchBody,
   classifyFailure,
   deployWithRetry,
@@ -324,15 +323,10 @@ describe('sanitize', () => {
   });
 });
 
-describe('shortAd / attemptLogFileName', () => {
+describe('shortAd', () => {
   it('shortens full availability domain names', () => {
     assert.equal(shortAd('fNXZ:US-ASHBURN-AD-1'), 'AD-1');
     assert.equal(shortAd('weird ad name'), 'weird-ad-name');
-  });
-  it('produces windows-safe, padded, deterministic filenames', () => {
-    const name = attemptLogFileName('2026-10-05T18:30:00.123Z', 3, 'fNXZ:US-ASHBURN-AD-1');
-    assert.equal(name, '2026-10-05T18-30-00-123Z-attempt-003-AD-1.log');
-    assert.equal(name.includes(':'), false);
   });
 });
 
@@ -754,14 +748,13 @@ describe('deployWithRetry', () => {
       assert.equal(outcome.kind, 'succeeded');
       assert.equal(outcome.attempt, 2);
       assert.deepEqual(sleeps, []);
-      const logs = (await readdir(dir)).sort();
-      assert.equal(logs.length, 2);
-      const first = await readFile(join(dir, logs[0] ?? ''), 'utf8');
-      assert.match(first, /Result: FAILED/);
-      assert.match(first, /OUT_OF_CAPACITY/);
-      assert.equal(first.includes('ssh-ed25519'), false);
-      const second = await readFile(join(dir, logs[1] ?? ''), 'utf8');
-      assert.match(second, /Result: SUCCEEDED/);
+      const logs = await readdir(dir);
+      assert.deepEqual(logs, ['oci-free-vm.log']);
+      const content = await readFile(join(dir, 'oci-free-vm.log'), 'utf8');
+      assert.match(content, /Result: FAILED/);
+      assert.match(content, /OUT_OF_CAPACITY/);
+      assert.match(content, /Result: SUCCEEDED/);
+      assert.equal(content.includes('ssh-ed25519'), false);
     } finally {
       await mock.close();
       await rm(dir, { recursive: true, force: true });
@@ -1001,13 +994,14 @@ describe('run in --json mode against a local fake', () => {
           'fNXZ:US-ASHBURN-AD-2',
           'fNXZ:US-ASHBURN-AD-3',
         ]);
-        const logs = (await readdir(join(dir, 'logs'))).sort();
-        assert.equal(logs.length, 2);
-        const failedLog = await readFile(join(dir, 'logs', logs[0] ?? ''), 'utf8');
-        assert.match(failedLog, /Result: FAILED/);
-        assert.match(failedLog, /OUT_OF_CAPACITY/);
-        assert.equal(failedLog.includes('ssh-ed25519'), false);
-        assert.equal(failedLog.includes('BEGIN PRIVATE KEY'), false);
+        const logs = await readdir(join(dir, 'logs'));
+        assert.deepEqual(logs, ['oci-free-vm.log']);
+        const logContent = await readFile(join(dir, 'logs', 'oci-free-vm.log'), 'utf8');
+        assert.match(logContent, /Result: FAILED/);
+        assert.match(logContent, /OUT_OF_CAPACITY/);
+        assert.match(logContent, /Result: SUCCEEDED/);
+        assert.equal(logContent.includes('ssh-ed25519'), false);
+        assert.equal(logContent.includes('BEGIN PRIVATE KEY'), false);
       } finally {
         await mock.close();
         await rm(dir, { recursive: true, force: true });
