@@ -63,6 +63,7 @@ Every attempt writes its own file under `~/.oci/oci-free-vm-logs/`. No private k
 - **`Authorization failed or requested resource not found`** — check the compartment OCID and the user's IAM policy.
 - **Only one AD is tried** — the region may expose just one. Verify with `oci iam availability-domain list`.
 - **Old behavior** — `npx` caches packages; run `npm cache clean --force`. A local build needs `npm run build`.
+- **`ENOSPC` or `EACCES`** — free disk space or fix permissions for `~/.oci` and `~/.ssh`. Log and state write failures are warnings; the retry loop continues.
 
 ## Docs
 

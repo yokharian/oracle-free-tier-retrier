@@ -797,6 +797,9 @@ At minimum classify:
 - Unsupported shape/image combination.
 - Invalid compartment.
 - Invalid networking configuration.
+- Local filesystem failure (full disk, missing permissions).
+
+Unexpected errors must be rendered with a readable message; the OCI SDK transport envelope is classified as transient.
 
 Example:
 

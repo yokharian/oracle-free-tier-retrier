@@ -39,8 +39,8 @@ export const EXIT = {
 
 export type Architecture = 'arm64' | 'x86_64';
 export type NetworkMode = 'existing' | 'create';
-export type FailureKind = 'capacity' | 'transient' | 'auth' | 'invalid' | 'fatal';
-export type FailureCode = 'OUT_OF_CAPACITY' | 'TRANSIENT' | 'AUTH' | 'CONFIG' | 'DEPLOY' | 'UNEXPECTED';
+export type FailureKind = 'capacity' | 'transient' | 'auth' | 'invalid' | 'local' | 'fatal';
+export type FailureCode = 'OUT_OF_CAPACITY' | 'TRANSIENT' | 'AUTH' | 'CONFIG' | 'LOCAL' | 'DEPLOY' | 'UNEXPECTED';
 
 
 export interface Failure {

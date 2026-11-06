@@ -350,6 +350,25 @@ describe('classifyFailure', () => {
       assert.equal(failure.code, 'TRANSIENT');
     }
   });
+  it('maps the OCI transport retrier envelope to retryable transient', () => {
+    const failure = classifyFailure({
+      code: 'ECONNRESET',
+      message: 'socket hang up',
+      requestEndpoint: 'https://compute.us-ashburn-1.oraclecloud.com',
+      troubleshootingPage: 'see docs',
+    });
+    assert.equal(failure.kind, 'transient');
+    assert.equal(failure.retryable, true);
+    assert.equal(failure.code, 'TRANSIENT');
+    assert.equal(failure.message, 'transport: ECONNRESET: socket hang up');
+  });
+  it('maps local filesystem failures to a local, non-retryable failure', () => {
+    const failure = classifyFailure(Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' }));
+    assert.equal(failure.kind, 'local');
+    assert.equal(failure.retryable, false);
+    assert.equal(failure.code, 'LOCAL');
+    assert.equal(failure.message, 'ENOSPC: no space left on device, write');
+  });
   it('maps auth errors to exit 3', () => {
     for (const status of [401, 403]) {
       const failure = classifyFailure(new OciHttpError('LaunchInstance', status, 'NotAuthorizedOrNotFound', 'denied'));

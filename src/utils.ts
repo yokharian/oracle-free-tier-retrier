@@ -58,6 +58,45 @@ export class NetworkError extends Error {
   }
 }
 
+interface OciRetrierError {
+  readonly code?: unknown;
+  readonly message?: unknown;
+  readonly requestEndpoint?: unknown;
+  readonly troubleshootingPage?: unknown;
+}
+
+/** oci-common throws this plain object when its transport retrier gives up. */
+export function isOciRetrierError(error: unknown): error is OciRetrierError {
+  return typeof error === 'object' && error !== null && 'requestEndpoint' in error && 'troubleshootingPage' in error;
+}
+
+const LOCAL_FILE_ERROR_CODES = new Set(['ENOSPC', 'EDQUOT', 'EACCES', 'EPERM', 'EROFS', 'EMFILE', 'ENFILE']);
+
+function isLocalFileError(error: unknown): error is Error & { readonly code: string } {
+  return error instanceof Error && 'code' in error && typeof error.code === 'string' && LOCAL_FILE_ERROR_CODES.has(error.code);
+}
+
+/** Readable text for Error instances and the plain objects OCI tooling throws. */
+export function describeThrown(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'object' && error !== null) {
+    const candidate = error as { code?: unknown; message?: unknown };
+    const code = typeof candidate.code === 'string' && candidate.code !== '' ? candidate.code : undefined;
+    const message = typeof candidate.message === 'string' && candidate.message !== '' ? candidate.message : undefined;
+    if (code !== undefined && message !== undefined) return `${code}: ${message}`;
+    if (message !== undefined) return message;
+    if (code !== undefined) return code;
+    try {
+      const json = JSON.stringify(error);
+      if (json !== undefined && json !== '{}') return json;
+    } catch {
+      return 'unknown OCI transport error'; // no-excuse-ok: catch — diagnostics must not throw
+    }
+    return 'unknown OCI transport error';
+  }
+  return String(error);
+}
+
 
 export function classifyFailure(error: unknown): Failure {
   if (error instanceof OciConfigError) {
@@ -68,6 +107,12 @@ export function classifyFailure(error: unknown): Failure {
   }
   if (error instanceof NetworkError) {
     return { kind: 'transient', retryable: true, exitCode: EXIT.deployFailed, code: 'TRANSIENT', message: error.message };
+  }
+  if (isOciRetrierError(error)) {
+    return { kind: 'transient', retryable: true, exitCode: EXIT.deployFailed, code: 'TRANSIENT', message: `transport: ${describeThrown(error)}` };
+  }
+  if (isLocalFileError(error)) {
+    return { kind: 'local', retryable: false, exitCode: EXIT.unexpected, code: 'LOCAL', message: describeThrown(error) };
   }
   if (error instanceof OciHttpError) {
     if (error.code === 'NotAuthorizedOrNotFound') {
@@ -90,7 +135,7 @@ export function classifyFailure(error: unknown): Failure {
     retryable: false,
     exitCode: EXIT.unexpected,
     code: 'UNEXPECTED',
-    message: error instanceof Error ? error.message : String(error),
+    message: describeThrown(error),
   };
 }
 
@@ -104,6 +149,8 @@ export function failureAdvice(kind: FailureKind): string {
       return 'Your OCI login is valid, but the user lacks permission for this operation in the selected compartment, or the OCID is wrong. Check the IAM policy, or select a different compartment.';
     case 'invalid':
       return 'Fix the reported configuration value and run again.';
+    case 'local':
+      return 'A local file operation failed. Free disk space or fix permissions for ~/.oci and ~/.ssh, then run again.';
     case 'fatal':
       return 'This error is not retryable.';
     default:
