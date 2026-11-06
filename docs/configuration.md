@@ -43,3 +43,5 @@ last_error:
 - `last_error` — the most recent failure code and message.
 
 The file is created on the first run and stays human-readable and editable. Secrets are never written to it.
+
+When each section is written during a run — and how an error is classified before it lands in `last_error` — is covered in [core concepts](concepts.md).

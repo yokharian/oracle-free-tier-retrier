@@ -48,6 +48,8 @@ It reads `~/.oci/config`, asks only for unresolved values, shows a plan, and cre
 - **Single-AD regions:** some regions expose one AD. Retries repeat there; check with `oci iam availability-domain list`.
 - **Stopping:** Ctrl+C deletes nothing, and the last state is saved.
 
+The mechanics behind this — every OCI operation involved, how failures are classified, and when state is written — are in [core concepts](docs/concepts.md).
+
 ## Configuration
 
 Values resolve as **flags > YAML > prompts > defaults**. The YAML file stores your defaults, discovered ADs, and last error — see [the configuration file](docs/configuration.md). Flags and exit codes live in the [CLI reference](docs/cli.md).
@@ -67,6 +69,7 @@ Every attempt appends a block to `~/.oci/oci-free-vm-logs/oci-free-vm.log`, sepa
 
 ## Docs
 
+- [Core concepts](docs/concepts.md)
 - [CLI options and exit codes](docs/cli.md)
 - [Configuration file](docs/configuration.md)
 - [Development and releases](docs/development.md)

@@ -1025,7 +1025,7 @@ Create `.github/workflows/publish.yml` and `.github/workflows/docker.yml`.
 
 Publishing occurs only from a `v*.*.*` tag pushed to `master`. The same tag — and every `master` push — builds and pushes the multi-arch Docker image (`linux/amd64`, `linux/arm64`) to GHCR via `docker.yml`.
 
-The current suite contains 43 tests; the local gate is `npm run typecheck && npm run build && npm test`.
+The current suite contains 47 tests; the local gate is `npm run typecheck && npm run build && npm test`.
 
 ---
 
@@ -1096,6 +1096,7 @@ The README is the short path into the product, not the reference manual.
 - Keep exactly one fenced `bash` block per run method. Docker is documented at the end, with a single `docker run` block.
 - Put the benefit-led "Why" section before the deeper behavior notes.
 - Link the reference material instead of inlining it:
+  - `docs/concepts.md` — core concepts: authentication, API operations, retries, classification, and state.
   - `docs/cli.md` — options and exit codes.
   - `docs/configuration.md` — the YAML file.
   - `docs/development.md` — build, test, and release.
