@@ -17,7 +17,7 @@ Every value resolves in this order: **CLI arguments > YAML defaults > interactiv
 | `--disk <gb>` | Boot volume size |
 | `--ssh-key <path>` | SSH public key file (default: `~/.ssh/id_ed25519.pub`) |
 | `--public-ip true\|false` | Assign a public IP |
-| `--delay <n>` | Seconds between full AD cycles (default: 900; `--interval-seconds` is an alias) |
+| `--delay <n>` | Seconds between full AD cycles (default: 900; max: 2,147,483; `--interval-seconds` is an alias) |
 | `--network-mode existing\|create` | Use the existing VCN values, or create a VCN |
 | `--vcn-id <ocid>`, `--subnet-id <ocid>` | Existing network IDs |
 

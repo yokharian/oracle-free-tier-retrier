@@ -614,7 +614,7 @@ defaults:
 
 Equivalent to 15 minutes.
 
-The interval must be configurable (`--delay`, or `retry.interval_seconds` in the YAML).
+The interval must be configurable (`--delay`, or `retry.interval_seconds` in the YAML). It must be a positive integer no greater than 2,147,483 seconds (the `setTimeout` limit).
 
 ---
 

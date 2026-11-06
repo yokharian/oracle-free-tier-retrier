@@ -19,6 +19,7 @@ export const LIMITS = {
   diskMaxGb: 32_768,
   ocpusMax: 64,
   memoryMaxGbs: 1024,
+  maxIntervalSeconds: 2_147_483,
   defaultIntervalSeconds: 900,
   defaultOcpus: 1,
   defaultMemoryGbs: 6,
@@ -327,7 +328,7 @@ const defaultsSchema = z.object({
     })
     .optional(),
   ssh: z.object({ public_key_file: z.string().optional() }).optional(),
-  retry: z.object({ interval_seconds: z.number().optional() }).optional(),
+  retry: z.object({ interval_seconds: z.number().int().positive().max(LIMITS.maxIntervalSeconds).optional() }).optional(),
 });
 
 const lastDeploymentSchema = z

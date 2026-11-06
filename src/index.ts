@@ -425,6 +425,9 @@ export function parseCliArgs(argv: readonly string[]): CliOverrides {
   const delay = str('delay');
   const intervalSeconds =
     delay !== undefined ? toPositiveInt('delay', delay) : toPositiveInt('interval-seconds', str('interval-seconds'));
+  if (intervalSeconds !== undefined && intervalSeconds > LIMITS.maxIntervalSeconds) {
+    throw new ConfigError(`--delay must be at most ${LIMITS.maxIntervalSeconds} seconds`);
+  }
   return {
     configPath: nonEmpty('config'),
     profile: nonEmpty('profile'),

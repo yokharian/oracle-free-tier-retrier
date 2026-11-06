@@ -630,6 +630,7 @@ describe('parseCliArgs', () => {
     assert.equal(parseCliArgs(['--interval-seconds', '30', '--delay', '900']).intervalSeconds, 900);
     assert.throws(() => parseCliArgs(['--delay', '0']), ConfigError);
     assert.throws(() => parseCliArgs(['--delay', 'soon']), ConfigError);
+    assert.throws(() => parseCliArgs(['--delay', '2147484']), ConfigError);
   });
 });
 
@@ -685,6 +686,8 @@ describe('yaml config round trip', () => {
       await assert.rejects(loadYamlConfig(join(dir, 'broken.yaml')), ConfigError);
       await writeFile(join(dir, 'bad-shape.yaml'), 'defaults:\n  architecture: riscv\n', 'utf8');
       await assert.rejects(loadYamlConfig(join(dir, 'bad-shape.yaml')), ConfigError);
+      await writeFile(join(dir, 'bad-interval.yaml'), 'defaults:\n  retry:\n    interval_seconds: 0\n', 'utf8');
+      await assert.rejects(loadYamlConfig(join(dir, 'bad-interval.yaml')), ConfigError);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
