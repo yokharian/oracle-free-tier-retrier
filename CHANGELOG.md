@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-10
+
+### Fixed
+
+- Published Docker image to Docker Hub (`docker.io/yokharian/oracle-free-tier-retrier`) instead of GitHub Container Registry (ghcr.io).
+- Updated examples and `docker-compose` to pin Docker Hub username `yokharian`.
+
+### Changed
+
+- Bumped dev dependencies (`@types/node` to 26.6.6, `@biomejs/biome` to 2.6.4).
+
+
 ## [0.7.0] - 2026-11-05
 
 ### Added
