@@ -1,7 +1,9 @@
 # oci-free-vm — Docker Compose.
 #
-# Replace every ${...} placeholder below (export the variables in your shell,
-# or put them in a .env file next to docker-compose.yml).
+# The image namespace is pinned to the Docker Hub account the CI publishes to;
+# the only remaining optional variable is OCI_FREE_VM_VERSION (defaults to latest).
+# Override OCI_CONFIG_PROFILE or OCI_FREE_VM_ENDPOINT by exporting them or
+# putting them in a .env file next to docker-compose.yml.
 #
 # Interactive deploy (prompts guide you through everything):
 #   docker compose run --rm oci-free-vm
@@ -16,7 +18,7 @@
 services:
   oci-free-vm:
     # Namespace of the image published by .github/workflows/docker.yml.
-    image: docker.io/${DOCKERHUB_USERNAME:?set DOCKERHUB_USERNAME to your Docker Hub user}/oracle-free-tier-retrier:${OCI_FREE_VM_VERSION:-latest}
+    image: docker.io/yokharian/oracle-free-tier-retrier:${OCI_FREE_VM_VERSION:-latest}
 
     stdin_open: true
     tty: true
