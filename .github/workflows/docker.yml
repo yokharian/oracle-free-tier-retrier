@@ -25,29 +25,25 @@ jobs:
     name: build & push image
     needs: test
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
-      - name: Log in to GitHub Container Registry
+      - name: Log in to Docker Hub
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
           # The package is linked to this repository through the Dockerfile
           # org.opencontainers.image.source label.
-          images: ghcr.io/${{ github.repository }}
+          images: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/oracle-free-tier-retrier
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -73,22 +69,18 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment:
-      name: ghcr
-      url: https://github.com/${{ github.repository }}/pkgs/container/${{ github.event.repository.name }}
-    permissions:
-      contents: read
-      packages: read
+      name: dockerhub
+      url: https://hub.docker.com/r/${{ secrets.DOCKERHUB_USERNAME }}/oracle-free-tier-retrier
     steps:
-      - name: Log in to GitHub Container Registry
+      - name: Log in to Docker Hub
         uses: docker/login-action@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Pull and run published image
         env:
-          IMAGE: ghcr.io/${{ github.repository }}@${{ needs.docker.outputs.digest }}
+          IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/oracle-free-tier-retrier@${{ needs.docker.outputs.digest }}
         run: |
           docker pull "$IMAGE"
           docker run --rm "$IMAGE" --version

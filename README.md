@@ -81,12 +81,12 @@ Every attempt appends a block to `~/.oci/oci-free-vm-logs/oci-free-vm.log`, sepa
 docker run --rm -it \
   -v ~/.oci:/home/node/.oci \
   -v ~/.ssh:/home/node/.ssh \
-  ghcr.io/yokharian/oracle-free-tier-retrier:latest
+  docker.io/<dockerhub-user>/oracle-free-tier-retrier:latest
 ```
 
 The mounts matter: `~/.oci` gives the CLI your credentials and a place to keep `oci-free-vm.yaml` and its logs; `~/.ssh` lets it use or generate your key pair. On Windows PowerShell, write `~` as `${HOME}`.
 
-For scripts, add `--json --yes` and pass `--compartment-id`, `--vcn-id`, `--subnet-id`, `--name`, and `--disk` on that same command. Compose users can run `docker compose run --rm oci-free-vm`. If a pull is denied, sign in with a GitHub token that has `read:packages`; build locally with `docker build -t oci-free-vm .`.
+For scripts, add `--json --yes` and pass `--compartment-id`, `--vcn-id`, `--subnet-id`, `--name`, and `--disk` on that same command. Compose users can run `docker compose run --rm oci-free-vm`. If a pull is denied, sign in with `docker login` (see [`.github/workflows/docker.yml`](.github/workflows/docker.yml)); build locally with `docker build -t oci-free-vm .`.
 
 ## License
 
