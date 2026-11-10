@@ -987,7 +987,7 @@ The package should expose:
 }
 ```
 
-The package is published as `oci-free-vm`; `0.6.0` is the current release on npm (with provenance) and as the `docker.io/<dockerhub-user>/oracle-free-tier-retrier:0.6.0` image.
+The package is published as `oci-free-vm`; `0.6.0` is the current release on npm (with provenance) and as the `docker.io/yokharian/oracle-free-tier-retrier:0.6.0` image.
 
 ---
 

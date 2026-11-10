@@ -81,7 +81,7 @@ Every attempt appends a block to `~/.oci/oci-free-vm-logs/oci-free-vm.log`, sepa
 docker run --rm -it \
   -v ~/.oci:/home/node/.oci \
   -v ~/.ssh:/home/node/.ssh \
-  docker.io/<dockerhub-user>/oracle-free-tier-retrier:latest
+  docker.io/yokharian/oracle-free-tier-retrier:latest
 ```
 
 The mounts matter: `~/.oci` gives the CLI your credentials and a place to keep `oci-free-vm.yaml` and its logs; `~/.ssh` lets it use or generate your key pair. On Windows PowerShell, write `~` as `${HOME}`.
